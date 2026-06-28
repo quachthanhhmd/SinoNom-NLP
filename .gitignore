@@ -4,9 +4,6 @@ venv/
 env/
 .venv/
 
-# Project specific
-dataset/
-output/
 
 # Python
 __pycache__/

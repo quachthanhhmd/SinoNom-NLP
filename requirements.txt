@@ -1,0 +1,13 @@
+pandas
+openpyxl
+PyPDF2
+google-generativeai
+python-dotenv
+paddlepaddle
+paddleocr
+underthesea
+scikit-learn
+requests
+Pillow
+numpy
+opencv-python

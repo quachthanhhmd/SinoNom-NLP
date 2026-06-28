@@ -1,0 +1,1 @@
+python3 main.py --han_dir dataset/china --viet_dir dataset/vietnam --output_dir output

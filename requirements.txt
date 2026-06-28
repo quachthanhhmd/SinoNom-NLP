@@ -3,8 +3,8 @@ openpyxl
 PyPDF2
 google-generativeai
 python-dotenv
-paddlepaddle
-paddleocr
+paddlepaddle-gpu
+paddleocr==2.8.1
 underthesea
 scikit-learn
 requests

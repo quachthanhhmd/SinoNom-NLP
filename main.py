@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--step_align", action="store_true", help="Run Step 3: Alignment (m-n mapping)")
     parser.add_argument("--run_all", action="store_true", help="Run all steps sequentially")
     parser.add_argument("--first-n-images", type=int, default=None, help="Only OCR the first N images in each Hán folder")
+    parser.add_argument("--global-concat", action="store_true", help="Merge all Hán folders and all Việt PDFs globally before processing")
     
     args = parser.parse_args()
     
@@ -84,34 +85,53 @@ def main():
         return
 
     han_works = sorted([d for d in os.listdir(args.han_dir) if os.path.isdir(os.path.join(args.han_dir, d))])
+    viet_pdfs = sorted([f for f in os.listdir(args.viet_dir) if f.lower().endswith(".pdf")])
     
     if not han_works:
         print(f"No work directories found in {args.han_dir}")
         return
 
-    for work_id in han_works:
-        han_input_path = os.path.join(args.han_dir, work_id)
-        expected_pdf = f"{work_id}.pdf"
-        viet_input_path = os.path.join(args.viet_dir, expected_pdf)
-        
-        if not os.path.exists(viet_input_path):
-            print(f"Warning: Corresponding PDF '{expected_pdf}' not found in {args.viet_dir} for folder '{work_id}'. Skipping.")
-            continue
-            
-        print(f"Mapping Hán directory '{work_id}' to Việt PDF '{expected_pdf}'")
+    if args.global_concat:
+        han_input_paths = [os.path.join(args.han_dir, w) for w in han_works]
+        viet_input_paths = [os.path.join(args.viet_dir, p) for p in viet_pdfs]
+        print(f"Global Concatenation Mode: Combining {len(han_input_paths)} Hán directories and {len(viet_input_paths)} Việt PDFs.")
         
         try:
-            pipeline.process_work(
-                work_id=work_id,
-                han_input=han_input_path,
-                viet_input=viet_input_path,
+            pipeline.process_global(
+                han_inputs=han_input_paths,
+                viet_inputs=viet_input_paths,
                 run_ocr=args.step_ocr,
                 run_seg=args.step_seg,
                 run_align=args.step_align,
                 first_n_images=args.first_n_images
             )
         except Exception as e:
-            print(f"Error processing {work_id}: {e}")
+            print(f"Error processing globally: {e}")
+            
+    else:
+        for work_id in han_works:
+            han_input_path = os.path.join(args.han_dir, work_id)
+            expected_pdf = f"{work_id}.pdf"
+            viet_input_path = os.path.join(args.viet_dir, expected_pdf)
+            
+            if not os.path.exists(viet_input_path):
+                print(f"Warning: Corresponding PDF '{expected_pdf}' not found in {args.viet_dir} for folder '{work_id}'. Skipping.")
+                continue
+                
+            print(f"Mapping Hán directory '{work_id}' to Việt PDF '{expected_pdf}'")
+            
+            try:
+                pipeline.process_work(
+                    work_id=work_id,
+                    han_input=han_input_path,
+                    viet_input=viet_input_path,
+                    run_ocr=args.step_ocr,
+                    run_seg=args.step_seg,
+                    run_align=args.step_align,
+                    first_n_images=args.first_n_images
+                )
+            except Exception as e:
+                print(f"Error processing {work_id}: {e}")
 
     print("Done!")
 

@@ -171,30 +171,24 @@ class PaddleOCRProvider(OCRProvider):
             if not result or not result[0]:
                 return ""
 
-            # OCRResult is a dict-like object (PaddleX API)
+            # PaddleOCR 2.8.x returns: [ [box_coords, (text, confidence)], ... ]
+            # where box_coords = [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
             ocr_result = result[0]
-            rec_texts  = ocr_result.get('rec_texts', [])
-            rec_scores = ocr_result.get('rec_scores', [1.0] * len(rec_texts))
-            dt_polys   = ocr_result.get('dt_polys', [])
 
             # ── Post-processing ───────────────────────────────────────────────
-            # After 90° CCW rotation:
-            #   new_y = W_orig - x_orig
-            # So the rightmost column (largest x_orig) → smallest new_y → TOP
-            # Sorting boxes by center_y ascending = right-to-left reading order ✓
-            # Within each "column-now-row", boxes are naturally ordered by center_x
-            # (which equals y_orig after CCW rotation = top-to-bottom reading) ✓
-
             boxes = []
-            for poly, text, conf in zip(dt_polys, rec_texts, rec_scores):
+            for line in ocr_result:
+                poly = line[0]           # [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+                text = line[1][0]        # recognized text
+                conf = line[1][1]        # confidence score
+
                 if conf < 0.4:
                     continue
                 # Filter out pure ASCII/noise
                 if re.fullmatch(r'[A-Za-z0-9\s\W]+', text):
                     continue
-                pts = [pt for pt in poly]
-                center_y = sum(pt[1] for pt in pts) / len(pts)
-                center_x = sum(pt[0] for pt in pts) / len(pts)
+                center_y = sum(pt[1] for pt in poly) / len(poly)
+                center_x = sum(pt[0] for pt in poly) / len(poly)
                 boxes.append((center_y, center_x, text))
 
             # ── Post-processing: column-band grouping ─────────────────────────

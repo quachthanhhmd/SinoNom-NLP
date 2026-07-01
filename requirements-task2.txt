@@ -1,0 +1,5 @@
+pymupdf
+pypdf
+underthesea
+pandas
+openpyxl

@@ -2,6 +2,11 @@ import cv2
 import numpy as np
 import re
 import os
+
+# Tắt MKLDNN để chống lỗi ConvertPirAttribute2RuntimeAttribute trên bản CPU v3
+os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
+os.environ["PADDLE_ENABLE_MKLDNN"] = "0"
+
 import argparse
 from scipy.signal import find_peaks
 

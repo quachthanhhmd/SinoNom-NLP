@@ -3,6 +3,10 @@
 import argparse
 import os
 
+# Tắt MKLDNN (OneDNN) để né lỗi ConvertPirAttribute2RuntimeAttribute của PaddlePaddle 3.x trên CPU
+os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
+os.environ["PADDLE_ENABLE_MKLDNN"] = "0"
+
 from config import Config
 
 def main():

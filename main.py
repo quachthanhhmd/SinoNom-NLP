@@ -1,6 +1,5 @@
 # NOTE: NOT REMOVE THIS LINE!
 # pyrefly: ignore [missing-import]
-import torch
 import argparse
 import os
 
@@ -39,8 +38,8 @@ def main():
         import logging
         logging.getLogger('ppocr').setLevel(logging.ERROR)
         
-        print("Initializing global PaddleOCR engine for batch processing...")
-        ocr_engine = PaddleOCR(lang='chinese_cht', use_textline_orientation=True)
+        print("Initializing global PaddleOCR engine for batch processing (CPU mode)...")
+        ocr_engine = PaddleOCR(lang='chinese_cht', use_textline_orientation=True, use_gpu=False)
 
         for work_id in han_works:
             han_input_path = os.path.join(args.han_dir, work_id)

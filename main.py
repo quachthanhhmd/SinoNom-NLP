@@ -18,6 +18,7 @@ def main():
     # Execution steps flags
     parser.add_argument("--first-n-images", type=int, default=None, help="Only OCR the first N images in each Hán folder")
     parser.add_argument("--do-ocr", action="store_true", help="Enable OCR processing")
+    parser.add_argument("--except-folders", nargs='+', default=[], help="List of folder names to exclude from OCR (e.g. --except-folders q1 q2)")
     
     args = parser.parse_args()
 
@@ -32,8 +33,13 @@ def main():
             return
 
         han_works = sorted([d for d in os.listdir(args.han_dir) if os.path.isdir(os.path.join(args.han_dir, d))])
+        
+        # Lọc bỏ các folder nằm trong except-folders
+        if args.except_folders:
+            han_works = [d for d in han_works if d not in args.except_folders]
+            
         if not han_works:
-            print(f"No work directories found in {args.han_dir}")
+            print(f"No valid work directories found in {args.han_dir} after filtering.")
             return
             
         import json

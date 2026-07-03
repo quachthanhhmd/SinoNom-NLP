@@ -1,3 +1,6 @@
+# NOTE: NOT REMOVE THIS LINE!
+# pyrefly: ignore [missing-import]
+import torch
 import argparse
 import os
 

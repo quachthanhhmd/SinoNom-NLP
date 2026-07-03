@@ -39,7 +39,7 @@ def main():
         logging.getLogger('ppocr').setLevel(logging.ERROR)
         
         print("Initializing global PaddleOCR engine for batch processing (CPU mode)...")
-        ocr_engine = PaddleOCR(lang='chinese_cht', use_textline_orientation=True, use_gpu=False)
+        ocr_engine = PaddleOCR(lang='chinese_cht', use_textline_orientation=True)
 
         for work_id in han_works:
             han_input_path = os.path.join(args.han_dir, work_id)

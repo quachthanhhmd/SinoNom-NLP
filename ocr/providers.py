@@ -4,6 +4,65 @@ from core.interfaces import OCRProvider
 
 import base64
 import requests
+import os
+
+class GeminiOCRProvider(OCRProvider):
+    def __init__(self):
+        try:
+            from config import Config
+            key = Config.GEMINI_API_KEY
+        except ImportError:
+            key = None
+            
+        self.api_key = key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not self.api_key:
+            print("[Warning] GEMINI_API_KEY is not set. Gemini OCR will not run.")
+            self.model = None
+        else:
+            genai.configure(api_key=self.api_key)
+            self.model_name = 'gemini-1.5-flash'
+            self.model = genai.GenerativeModel(self.model_name)
+            
+    def extract_text(self, image_path: str) -> str:
+        if not self.model:
+            return ""
+            
+        print(f"[GeminiOCR] Extracting text from {image_path} using {self.model_name}")
+        try:
+            img = Image.open(image_path)
+            prompt = (
+                "Extract the Classical Chinese (Sino-Nom) text from this document image. "
+                "The text is written in vertical columns. You must read the columns from RIGHT to LEFT. "
+                "Within each column, read characters from TOP to BOTTOM. "
+                "Output ONLY the extracted text. Separate each column with a newline. "
+                "Do not include any markdown formatting, explanations, or translations."
+            )
+            response = self.model.generate_content([prompt, img])
+            if response and response.text:
+                return response.text.strip()
+            return ""
+        except Exception as e:
+            print(f"[GeminiOCR] Error with {self.model_name}: {e}")
+            if "404" in str(e) or "not found" in str(e):
+                print("[GeminiOCR] Attempting fallback to 'gemini-pro-vision'...")
+                try:
+                    self.model_name = 'gemini-pro-vision'
+                    self.model = genai.GenerativeModel(self.model_name)
+                    response = self.model.generate_content([prompt, img])
+                    if response and response.text:
+                        return response.text.strip()
+                except Exception as fallback_e:
+                    print(f"[GeminiOCR] Fallback also failed: {fallback_e}")
+                    
+                    # Print available models for debugging
+                    print("[GeminiOCR] Available models:")
+                    try:
+                        for m in genai.list_models():
+                            if 'generateContent' in m.supported_generation_methods:
+                                print(m.name)
+                    except:
+                        pass
+            return ""
 
 class GoogleVisionOCR(OCRProvider):
     def __init__(self, api_key: str):
@@ -120,132 +179,73 @@ class KanDianGuJiOCR(OCRProvider):
             return "Tự Hán (KanDianGuJi - Error)"
 
 class PaddleOCRProvider(OCRProvider):
-    def __init__(self):
+    def __init__(self, segment_sentences: bool = False):
+        self.segment_sentences = segment_sentences
         try:
+            # Monkey-patch to fix PaddlePaddle 3.0 compatibility with Paddlex
+            import paddle
+            try:
+                if not hasattr(paddle.base.libpaddle.AnalysisConfig, 'set_optimization_level'):
+                    paddle.base.libpaddle.AnalysisConfig.set_optimization_level = lambda *args, **kwargs: None
+            except Exception:
+                pass
+                
             from paddleocr import PaddleOCR
-            # lang='chinese_cht' for Traditional Chinese (Sino-Nom)
-            # use_angle_cls=True helps correct any residual tilt after rotation
-            self.ocr = PaddleOCR(
-                use_angle_cls=True, 
-                lang='chinese_cht',
-                det_db_unclip_ratio=1.8,  # Expand boxes slightly to catch cut off chars at the end
-                det_db_box_thresh=0.4     # Lower threshold to keep faint/thin lines
-            )
+            import paddleocr
+            # Check version to pass correct arguments (PaddleOCR 3.7+ uses different kwarg names)
+            version = getattr(paddleocr, '__version__', '2.8.1')
+            
+            if version.startswith('3'):
+                self.ocr = PaddleOCR(
+                    use_textline_orientation=True, 
+                    lang='chinese_cht',
+                    text_det_unclip_ratio=1.8,
+                    text_det_box_thresh=0.4
+                    # drop_score is not supported in 3.x
+                )
+            else:
+                self.ocr = PaddleOCR(
+                    use_angle_cls=True, 
+                    lang='chinese_cht',
+                    det_db_unclip_ratio=1.8,
+                    det_db_box_thresh=0.4,
+                    drop_score=0.3
+                )
         except ImportError:
             print("[Warning] PaddleOCR is not installed.")
             self.ocr = None
 
     def extract_text(self, image_path: str) -> str:
         if not self.ocr:
-            return "Tự Hán (Paddle - Not Installed)"
-
-        print(f"[PaddleOCR] Extracting text from {image_path}")
-
+            return ""
+        
         try:
-            import cv2
-            import re
-
-            # ── Pre-processing: rotate 90° counter-clockwise ──────────────────
-            # Original document: vertical columns, read RIGHT → LEFT, TOP → BOTTOM
-            # After CCW rotation: center_x = y_orig, center_y = W_orig - x_orig
-            #   • Province name (rightmost in original = large x_orig) → small center_y
-            #   • Province band (y position range in original) → center_x range
-            image = cv2.imread(image_path)
-            if image is None:
-                return "Tự Hán (Paddle - Image Load Error)"
-
-            # 1. Padding: add a 50px white border to prevent edge characters from being cropped
-            image = cv2.copyMakeBorder(image, 50, 50, 50, 50, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+            import os
+            import sys
             
-            # 2. Grayscale (No extreme binarization to preserve calligraphy nuances)
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            from ocr.ocr_pipeline import ocr_sinonom_page
             
-            # PaddleOCR expects a 3-channel image for its internal pipeline
-            image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-
-            rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-            # ── OCR ───────────────────────────────────────────────────────────
-            result = self.ocr.ocr(rotated)
-
-            if not result or not result[0]:
-                return ""
-
-            # PaddleOCR 2.8.x returns: [ [box_coords, (text, confidence)], ... ]
-            # where box_coords = [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-            ocr_result = result[0]
-
-            # ── Post-processing ───────────────────────────────────────────────
-            boxes = []
-            for line in ocr_result:
-                poly = line[0]           # [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-                text = line[1][0]        # recognized text
-                conf = line[1][1]        # confidence score
-
-                if conf < 0.4:
-                    continue
-                # Filter out pure ASCII/noise
-                if re.fullmatch(r'[A-Za-z0-9\s\W]+', text):
-                    continue
-                center_y = sum(pt[1] for pt in poly) / len(poly)
-                center_x = sum(pt[0] for pt in poly) / len(poly)
-                boxes.append((center_y, center_x, text))
-
-            # ── Post-processing: column-band grouping ─────────────────────────
-            # After CCW rotation: center_x = y_orig (province data band position)
-            # Each province occupies a BAND of center_x values (its y position range)
-            # Sort boxes by center_x ascending, then detect gaps to form bands.
-            # Bands are sorted descending by avg center_x (底部→總計 first, 頂部→慶和省 last).
-            # Within each band, sort by center_y ascending (province name = rightmost
-            # in original = smallest center_y → appears first). ✓
-
-            boxes.sort(key=lambda b: b[1])  # sort by center_x ascending
-
-            # Gap-based band detection: split when gap > BAND_THRESHOLD
-            BAND_THRESHOLD = 90  # pixels between consecutive center_x values
-            bands = []
-            for box in boxes:
-                if not bands:
-                    bands.append([box])
-                else:
-                    gap = box[1] - bands[-1][-1][1]
-                    if gap > BAND_THRESHOLD:
-                        bands.append([box])
-                    else:
-                        bands[-1].append(box)
-
-            # Sort bands by average center_x DESCENDING
-            # (large center_x = large y_orig = bottom of page = 總計 section first)
-            bands.sort(key=lambda band: sum(b[1] for b in band) / len(band), reverse=True)
-
-            # Within each band, sort by center_y ASCENDING
-            # (small center_y = large x_orig = rightmost in original = province name first)
-            text_lines = []
-            for band in bands:
-                band.sort(key=lambda b: b[0])
-                for box in band:
-                    text_lines.append(box[2])
-
-
-            # ── Post-corrections ──────────────────────────────────────────────
-            corrections = {
-                "廣義脊": "廣義省",
-                "四土":   "田土",
-                "五萬空百": "五萬八百",
-                "二十九部": "二十九畝",
-                "稅案":   "稅粟",
-            }
-            corrected = []
-            for line in text_lines:
-                for wrong, right in corrections.items():
-                    line = line.replace(wrong, right)
-                corrected.append(line)
-
-            return "\n".join(corrected)
+            # Call the advanced pipeline
+            raw_output = ocr_sinonom_page(
+                image_path=image_path,
+                raw_columns=not self.segment_sentences,
+                debug_ocr=False,
+                output_dir=None,
+                ocr_engine=self.ocr
+            )
+            
+            if not self.segment_sentences:
+                # Return raw text separated by newlines (OCR Only)
+                # raw_output is a list of JSON dicts
+                text_lines = [item['text'] for item in raw_output if isinstance(item, dict) and 'text' in item]
+                return "\n".join(text_lines)
+            else:
+                # Return segmented sentences separated by newlines
+                return "\n".join(raw_output)
 
         except Exception as e:
             import traceback
-            print(f"[PaddleOCR] Error: {e}")
+            print(f"[PaddleOCR] Advanced Pipeline Error: {e}")
             traceback.print_exc()
             return "Tự Hán (Paddle - Error)"
 

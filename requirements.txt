@@ -4,7 +4,7 @@ PyPDF2
 google-generativeai
 python-dotenv
 paddlepaddle-gpu
-paddleocr==2.8.1
+paddleocr==3.7.0
 underthesea
 scikit-learn
 requests

@@ -1,0 +1,18 @@
+{
+    "02": {
+        "is_half_page": true,
+        "skip_pages": [1, 2, 3]
+    },
+    "12": {
+        "is_half_page": true,
+        "skip_pages": [1, 2, 3, 74, 75, 101]
+    },
+    "13": {
+        "is_half_page": true,
+        "skip_pages": [1, 2, 3, 107, 108, 135]
+    },
+    "14_15": {
+        "is_half_page": true,
+        "skip_pages": [1, 2, 3, 78, 79, 151]
+    }
+}

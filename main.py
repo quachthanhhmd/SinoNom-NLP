@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--han_pdf_dir", type=str, default="dataset/china/han_pdf", help="Directory containing Hán PDF files")
     parser.add_argument("--run-config", type=str, default="run_config.json", help="Path to JSON run configuration")
     parser.add_argument("--ocr-pdf", type=str, default=None, help="Specific PDF file to OCR (e.g. 02.pdf). Skips all other files.")
+    parser.add_argument("--debug", action="store_true", help="Enable saving debug images during processing")
     
     args = parser.parse_args()
 
@@ -93,10 +94,14 @@ def main():
                     print(f"Processing image: {img_name}")
                     img_path = os.path.join(han_input_path, img_name)
                     try:
+                        debug_output_dir = None
+                        if args.debug:
+                            debug_output_dir = os.path.join(han_ocr_out_dir, f"debug_{work_id}_{img_name}")
+                            
                         page_results = ocr_sinonom_page(
                             image_path=img_path, 
                             debug_ocr=False, 
-                            output_dir=None,
+                            output_dir=debug_output_dir,
                             ocr_engine=ocr_engine,
                             is_half_page=is_half_page
                         )
@@ -174,7 +179,7 @@ def main():
                                 img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
                                 
                             debug_output_dir = None
-                            if args.ocr_pdf:
+                            if args.debug:
                                 debug_output_dir = os.path.join(han_ocr_out_dir, f"debug_{work_id}_page_{page_num_1_indexed}")
                                 
                             page_results = ocr_sinonom_page(

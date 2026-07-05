@@ -17,44 +17,90 @@ def save_debug_image(img, step_name, output_dir):
         cv2.imwrite(out_path, img)
         print(f"Saved debug image: {out_path}")
 
-def preprocess(image_path: str, output_dir: str = None, max_size: int = 2500):
+def auto_crop_margins(img, padding=50):
+    """
+    Tự động cắt bỏ lề trắng thừa của trang PDF/ảnh để tập trung vào nội dung chính.
+    Dùng phương pháp chiếu (projection) để loại bỏ nhiễu nhỏ.
+    """
+    _, bw = cv2.threshold(img, 220, 255, cv2.THRESH_BINARY_INV)
+    
+    # Cộng dồn số điểm ảnh đen theo chiều dọc và ngang
+    col_sum = np.sum(bw, axis=0)
+    row_sum = np.sum(bw, axis=1)
+    
+    # Ngưỡng chống nhiễu: Cột/Hàng phải có ít nhất 10 pixel đen thì mới tính là có nội dung
+    noise_threshold = 255 * 10 
+    
+    valid_cols = np.where(col_sum > noise_threshold)[0]
+    valid_rows = np.where(row_sum > noise_threshold)[0]
+    
+    if len(valid_cols) > 0 and len(valid_rows) > 0:
+        x1 = max(0, valid_cols[0] - padding)
+        x2 = min(img.shape[1], valid_cols[-1] + padding)
+        y1 = max(0, valid_rows[0] - padding)
+        y2 = min(img.shape[0], valid_rows[-1] + padding)
+        return img[y1:y2, x1:x2]
+        
+    return img
+
+def preprocess(image_path: str = None, image_np: np.ndarray = None, output_dir: str = None, max_size: int = 2500):
     """
     Step 2: Preprocessing
     Deskew using Hough line detection against vertical rules.
     Binarize with Adaptive Thresholding.
     Nếu ảnh quá to (vượt quá max_size), tự động thu nhỏ lại để tránh nhiễu nét và tăng tốc OCR.
     """
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        raise ValueError(f"Could not read image at {image_path}")
+    if image_np is not None:
+        if len(image_np.shape) == 3:
+            img = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
+        else:
+            img = image_np.copy()
+    elif image_path is not None:
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise ValueError(f"Could not read image at {image_path}")
+    else:
+        raise ValueError("Either image_path or image_np must be provided")
         
+    # [NEW] Cắt bỏ lề trắng thừa trước khi resize để giữ độ phân giải cao nhất cho phần chữ
+    img = auto_crop_margins(img, padding=50)
+    save_debug_image(img, "00_cropped", output_dir)
+    
     h, w = img.shape
     if max(h, w) > max_size:
         scale = max_size / max(h, w)
         img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     
-    # 1. Deskew using Standard Hough Transform (more accurate sub-degree angles than HoughLinesP)
+    # 1. Deskew using Probabilistic Hough Transform
+    # Lọc độ dài tối thiểu (minLineLength = h // 4) để CHỈ bắt các đường kẻ khung viền (rất dài)
+    # và phớt lờ hoàn toàn các nét chữ Hán (vốn rất ngắn) gây nhiễu góc xoay.
     edges = cv2.Canny(img, 50, 150, apertureSize=3)
-    # Use high resolution for theta (0.1 degrees = np.pi/1800)
-    lines = cv2.HoughLines(edges, 1, np.pi / 1800, 200)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 1800, threshold=100, minLineLength=h // 4, maxLineGap=20)
     
     if lines is not None:
         vertical_angles = []
         for line in lines:
-            rho, theta = line[0]
-            angle = np.degrees(theta)
-            # Find vertical lines (angle near 0 or 180 degrees in Hough space)
-            if angle < 45:
-                vertical_angles.append(angle)
-            elif angle > 135:
-                vertical_angles.append(angle - 180)
-                
-        if vertical_angles:
+            x1, y1, x2, y2 = line[0]
+            if y2 != y1:
+                dx = x2 - x1
+                dy = y2 - y1
+                # Tính góc lệch so với trục dọc (Y)
+                angle = np.degrees(np.arctan(dx / dy))
+                # Chỉ xét các đường gần như dọc (lệch < 5 độ)
+                if abs(angle) < 5:
+                    vertical_angles.append(angle)
+                    
+        if len(vertical_angles) > 0:
             median_angle = np.median(vertical_angles)
             if abs(median_angle) > 0.1:  # Rotate if skew is > 0.1 degrees
+                # Math: angle = arctan(dx/dy). Góc âm có nghĩa là đường thẳng nghiêng từ trên-phải xuống dưới-trái (Clockwise).
+                # OpenCV getRotationMatrix2D: góc DƯƠNG là xoay NGƯỢC chiều kim đồng hồ (Counter-Clockwise).
+                # Để sửa một ảnh bị nghiêng Clockwise (âm), ta phải xoay nó Counter-Clockwise (dương).
+                # Do đó: correction_angle = -median_angle!
+                correction_angle = -median_angle
                 (h, w) = img.shape[:2]
                 center = (w // 2, h // 2)
-                M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+                M = cv2.getRotationMatrix2D(center, correction_angle, 1.0)
                 img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
                 
     save_debug_image(img, "01_deskewed", output_dir)
@@ -70,41 +116,115 @@ def detect_columns(page: np.ndarray, thresh: np.ndarray, output_dir: str = None)
     Step 3a: Column detection
     Use Vertical Projection Profile to find column boundaries.
     """
+    h, w = page.shape[:2]
+    
+    # [NEW] CHIẾN THUẬT LƯỚI KẺ (GRID LINES):
+    # Sách Hán Nôm thường có các lằn kẻ dọc màu đen phân tách các cột.
+    # Trong ảnh `thresh`, các lằn kẻ này là các đường thẳng đứng màu trắng rất dài.
+    # Ta dùng MORPH_OPEN với kernel dọc dài (h//20 ~ 125px) để xóa sạch chữ Hán, chỉ giữ lại các lằn kẻ.
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(50, h // 20)))
+    grid_lines_img = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel)
+    
+    grid_proj = np.sum(grid_lines_img, axis=0)
+    
+    # Tìm các đỉnh của lưới kẻ (prominence vừa đủ để bắt các đường mờ)
+    grid_peaks, _ = find_peaks(grid_proj, distance=40, prominence=h * 10)
+    
+    # Chuẩn bị sẵn dữ liệu Projection (tổng điểm ảnh theo cột dọc) 
+    # để phân tích mật độ chữ cho thuật toán chẻ cột Song Hành hoặc Fallback
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
     morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-    
     proj = np.sum(morphed, axis=0)
-    kernel_size = 25
-    smoothed = np.convolve(proj, np.ones(kernel_size)/kernel_size, mode='same')
     
-    # Sử dụng prominence lớn hơn (10000 thay vì 3000) để bỏ qua các thung lũng nông 
-    # Sử dụng prominence = 15000 để lờ đi các nhiễu rãnh dọc BÊN TRONG lòng chữ (do các bộ thủ trái-phải tạo ra),
-    # đồng thời vẫn giữ được các khe hở thật sự giữa các cột chữ (thường > 25000).
-    peaks, _ = find_peaks(-smoothed, distance=40, prominence=15000)
-    initial_boundaries = [0] + list(peaks) + [page.shape[1]]
-    
-    # --- THUẬT TOÁN ADAPTIVE SPLITTING ---
-    # Phục hồi các cột bị bỏ sót (VD: cột chỉ có 1 chữ "論") do quá hẹp và ít mực
-    widths = np.diff(initial_boundaries)
-    valid_widths = [w for w in widths if 50 < w < 200]
-    median_width = np.median(valid_widths) if valid_widths else 110
-    
-    boundaries = [0]
-    for i in range(1, len(initial_boundaries)-1):
-        prev_b = boundaries[-1]
-        curr_b = initial_boundaries[i]
+    if len(grid_peaks) >= 3:
+        # Nếu có lưới kẻ rõ ràng, dùng luôn làm ranh giới cắt! Chính xác tuyệt đối!
+        initial_boundaries = [0] + list(grid_peaks) + [w]
         
-        # Nếu phát hiện khoảng cách giữa 2 lằn cắt quá rộng (> 1.4 lần cột bình thường)
-        if curr_b - prev_b > 1.4 * median_width:
-            # Quét lại cục bộ với độ nhạy (prominence) cực thấp để mò ra rãnh cắt ẩn
-            local_segment = -smoothed[prev_b:curr_b]
-            local_peaks, _ = find_peaks(local_segment, distance=40, prominence=2000)
-            for lp in local_peaks:
-                boundaries.append(prev_b + lp)
+        widths = np.diff(initial_boundaries)
+        valid_widths = [wd for wd in widths if 50 < wd < 200]
+        median_width = np.median(valid_widths) if valid_widths else 110
+        
+        boundaries = [0]
+        for i in range(1, len(initial_boundaries)-1):
+            prev_b = boundaries[-1]
+            curr_b = initial_boundaries[i]
+            
+            # Khác với thung lũng, Lưới kẻ có độ chính xác tuyệt đối nên không cần Adaptive Splitting.
+            # TUY NHIÊN, vẫn phải chạy kiểm tra Song Hành (Double Column) để chẻ đôi nếu cần!
+            col_w = curr_b - prev_b
+            if col_w > 0.6 * median_width:
+                col_proj = proj[prev_b : curr_b]
+                smooth_col = np.convolve(col_proj, np.ones(5)/5, mode='same')
                 
-        boundaries.append(curr_b)
+                mid_left = int(0.30 * col_w)
+                mid_right = int(0.70 * col_w)
+                
+                left_part = smooth_col[:mid_left]
+                center_part = smooth_col[mid_left:mid_right]
+                right_part = smooth_col[mid_right:]
+                
+                if len(left_part) > 0 and len(center_part) > 0 and len(right_part) > 0:
+                    max_left = np.max(left_part)
+                    max_right = np.max(right_part)
+                    min_center = np.min(center_part)
+                    
+                    if (min_center < 0.6 * max_left and min_center < 0.6 * max_right) or (min_center < 255 * 30):
+                        split_idx = mid_left + np.argmin(center_part)
+                        boundaries.append(int(prev_b + split_idx))
+                        
+            boundaries.append(curr_b)
+            
+        # Thêm ranh giới cuối cùng (mép phải trang sách - w)
+        boundaries.append(initial_boundaries[-1])
         
-    boundaries.append(initial_boundaries[-1])
+    else:
+        # FALLBACK: Nếu sách viết tay không có lưới kẻ, dùng thuật toán thung lũng (Valleys) cũ
+        kernel_size = 25
+        smoothed = np.convolve(proj, np.ones(kernel_size)/kernel_size, mode='same')
+        
+        peaks, _ = find_peaks(-smoothed, distance=40, prominence=15000)
+        initial_boundaries = [0] + list(peaks) + [w]
+        
+        widths = np.diff(initial_boundaries)
+        valid_widths = [wd for wd in widths if 50 < wd < 200]
+        median_width = np.median(valid_widths) if valid_widths else 110
+        
+        boundaries = [0]
+        for i in range(1, len(initial_boundaries)-1):
+            prev_b = boundaries[-1]
+            curr_b = initial_boundaries[i]
+            if curr_b - prev_b > 1.4 * median_width:
+                local_segment = -smoothed[prev_b:curr_b]
+                local_peaks, _ = find_peaks(local_segment, distance=40, prominence=2000)
+                for lp in local_peaks:
+                    boundaries.append(prev_b + lp)
+            else:
+                # [NEW] KIỂM TRA CỘT CHÚ THÍCH SONG HÀNH (DOUBLE COLUMN)
+                col_w = curr_b - prev_b
+                if col_w > 0.6 * median_width:
+                    col_proj = proj[prev_b : curr_b]
+                    smooth_col = np.convolve(col_proj, np.ones(5)/5, mode='same')
+                    
+                    mid_left = int(0.30 * col_w)
+                    mid_right = int(0.70 * col_w)
+                    
+                    left_part = smooth_col[:mid_left]
+                    center_part = smooth_col[mid_left:mid_right]
+                    right_part = smooth_col[mid_right:]
+                    
+                    if len(left_part) > 0 and len(center_part) > 0 and len(right_part) > 0:
+                        max_left = np.max(left_part)
+                        max_right = np.max(right_part)
+                        min_center = np.min(center_part)
+                        
+                        if (min_center < 0.6 * max_left and min_center < 0.6 * max_right) or (min_center < 255 * 30):
+                            split_idx = mid_left + np.argmin(center_part)
+                            boundaries.append(int(prev_b + split_idx))
+                            
+            boundaries.append(curr_b)
+            
+        # Thêm ranh giới cuối cùng (mép phải trang sách - w)
+        boundaries.append(initial_boundaries[-1])
     # -------------------------------------
     
     columns_info = []
@@ -263,7 +383,7 @@ def recognize_columns(valid_cols: list[dict], debug_ocr: bool = False, ocr_engin
         
     return final_results
 
-def post_process_ocr(raw_results: list[dict]) -> list[dict]:
+def post_process_ocr(raw_results: list[dict], is_half_page: bool = False) -> list[dict]:
     """
     Sửa các lỗi OCR đồng hình thường gặp dựa trên Từ điển Ngữ cảnh (N-gram).
     """
@@ -319,33 +439,30 @@ def post_process_ocr(raw_results: list[dict]) -> list[dict]:
     filtered_results = []
     for item in raw_results:
         text = item['text']
+        
         for wrong, right in correction_rules:
             text = text.replace(wrong, right)
             
         # 3. LỌC NHIỄU (Anti-noise filter)
-        # Xóa toàn bộ số từ 0-9 lẫn vào trong chuỗi Hán văn do máy nhận diện nhầm
         text = re.sub(r'[0-9]', '', text)
         
-        # Lọc rác đường viền (Border Hallucinations)
-        # Máy hay nhận diện đường thẳng kẻ khung thành chữ "一", "二", "丨"
-        # Nếu cột chỉ có 1-2 ký tự và toàn là các nét đơn giản này -> Khẳng định là rác
-        if len(text) <= 2 and all(char in "一二三丨|" for char in text):
-            text = "" # Đánh dấu chuỗi rỗng để xóa
+        if not is_half_page:
+            if len(text) <= 2 and all(char in "一二三丨|" for char in text):
+                text = "" # Đánh dấu chuỗi rỗng để xóa
             
-        # Cập nhật lại text sau khi dọn dẹp
         item['text'] = text
         
-        # Chỉ giữ lại những cột có chữ sau khi dọn rác
         if text.strip():
             filtered_results.append(item)
             
     return filtered_results
 
-def ocr_sinonom_page(image_path: str, debug_ocr: bool = False, output_dir: str = None, ocr_engine = None, verbose: bool = False):
+def ocr_sinonom_page(image_path: str = None, image_np: np.ndarray = None, debug_ocr: bool = False, output_dir: str = None, ocr_engine = None, verbose: bool = False, is_half_page: bool = False, pdf_page_num: int = None, pdf_filename: str = None):
     if verbose:
-        print(f"Processing image: {image_path}")
+        src_name = image_path if image_path else f"{pdf_filename} (page {pdf_page_num})"
+        print(f"Processing image: {src_name}")
         print("Step 2: Preprocessing...")
-    page, thresh = preprocess(image_path, output_dir)
+    page, thresh = preprocess(image_path, image_np, output_dir)
     
     if verbose:
         print("Step 3a: Column detection...")
@@ -356,51 +473,59 @@ def ocr_sinonom_page(image_path: str, debug_ocr: bool = False, output_dir: str =
     if verbose:
         print("Step 3b: Geometric Classification & Auto-Scaling...")
     valid_cols = analyze_and_scale_columns(columns_info, page.shape[1], output_dir)
-    if verbose:
-        print(f"         Kept {len(valid_cols)} valid text columns (Filtered out {len(columns_info) - len(valid_cols)} noise columns).")
     
     if verbose:
         print("Step 4: Character recognition & Reassembly...")
     col_results = recognize_columns(valid_cols, debug_ocr, ocr_engine=ocr_engine)
     
-    # --- Áp dụng Từ điển Ngữ cảnh (N-gram) để sửa các lỗi nhận diện ---
-    col_results = post_process_ocr(col_results)
+    col_results = post_process_ocr(col_results, is_half_page=is_half_page)
     
-    # Generate JSON structures
     import json
-    volume = os.path.basename(os.path.dirname(os.path.abspath(image_path)))
-    filename = os.path.basename(image_path)
-    m = re.search(r'(\d+)', filename)
-    page_number = int(m.group(1)) if m else 0
+    
+    if pdf_filename:
+        volume = os.path.basename(os.path.dirname(os.path.abspath(pdf_filename))) if image_path is None else "pdf"
+        filename = pdf_filename
+        page_number = pdf_page_num if pdf_page_num is not None else 0
+    else:
+        volume = os.path.basename(os.path.dirname(os.path.abspath(image_path))) if image_path else "unknown"
+        filename = os.path.basename(image_path) if image_path else "unknown"
+        if pdf_page_num is not None:
+            page_number = pdf_page_num
+        else:
+            m = re.search(r'(\d+)', filename)
+            page_number = int(m.group(1)) if m else 0
     
     page_width = page.shape[1]
     
     keyword_pattern = re.compile(r'(大南|統志|卷|表)')
     candidates = []
     
-    # BƯỚC 1: LỌC ỨNG VIÊN BẢN TĂM
-    # Bản tâm không nhất thiết phải nằm gắt gao ở 45-55%, có thể trang bị crop lệch
-    # Nên mở rộng ra 35% - 65%
     for res in col_results:
         c = res['col_info']
         center_x = c['x_center']
         text = res['text']
         
-        if 0.35 * page_width < center_x < 0.65 * page_width:
+        if is_half_page:
+            if page_number > 0:
+                if page_number % 2 != 0: # Trang Lẻ (Odd) -> Bản tâm nằm bên PHẢI (Right edge)
+                    valid_zone = (center_x > 0.75 * page_width)
+                    distance = page_width - center_x
+                else: # Trang Chẵn (Even) -> Bản tâm nằm bên TRÁI (Left edge)
+                    valid_zone = (center_x < 0.25 * page_width)
+                    distance = center_x
+            else:
+                valid_zone = (center_x < 0.20 * page_width) or (center_x > 0.80 * page_width)
+                distance = min(center_x, page_width - center_x)
+        else:
+            valid_zone = (0.35 * page_width < center_x < 0.65 * page_width)
             distance = abs(center_x - (page_width / 2))
             
-            # Tính điểm khả năng là Bản tâm
+        if valid_zone:
             score = 0
-            
-            # 1. Ngư vĩ (Fishtail) là dấu hiệu mạnh nhất
             if re.search(r'[■□▣◼◻]', text):
                 score += 200
-                
-            # 2. Từ khóa tên sách
             if keyword_pattern.search(text):
                 score += 50
-                
-            # 3. Số trang
             if re.search(r'[一二三四五六七八九十百]+', text):
                 score += 50
                 
@@ -433,6 +558,16 @@ def ocr_sinonom_page(image_path: str, debug_ocr: bool = False, output_dir: str =
             # Ưu tiên 2: Nếu điểm bằng nhau, khoảng cách tới trung tâm càng gần càng tốt
             valid_candidates = sorted(valid_candidates, key=lambda x: (-x["score"], x["distance"]))
             centerfold_res = valid_candidates[0]["res"]
+            
+    if output_dir:
+        debug_img = cv2.cvtColor(page, cv2.COLOR_GRAY2BGR)
+        if centerfold_res:
+            c = centerfold_res['col_info']
+            # Vẽ viền xanh lá cây (Green) dày 5px cho cột được chọn làm Bản tâm
+            cv2.rectangle(debug_img, (int(c['x_left']), 0), (int(c['x_right']), int(c['height'])), (0, 255, 0), 5)
+            # Viết chữ "Banxin" lên trên cùng
+            cv2.putText(debug_img, "Banxin", (int(c['x_left']), 50), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
+        save_debug_image(debug_img, "04_centerfold_banxin", output_dir)
             
     json_output = []
     for res in col_results:

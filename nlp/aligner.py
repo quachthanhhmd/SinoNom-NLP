@@ -146,57 +146,91 @@ class TranslationCosineAligner(Aligner):
 
 class EmbeddingSentenceAligner(Aligner):
     """
-    Sentence-level Aligner using Multilingual Sentence Embeddings (LaBSE / Multilingual E5)
-    and Dynamic Programming supporting m-n alignment.
+    Sentence-level Aligner using:
+    1. Helsinki-NLP/opus-mt-zh-vi translation model to translate Han sentences to Viet.
+    2. Multilingual Sentence Embeddings (LaBSE) to compute Cosine Similarity between Viet translation and Viet target.
+    3. Dynamic Programming for optimal m-n alignment, outputting similarity_score.
     """
-    def __init__(self, model_name: str = "sentence-transformers/LaBSE", device: str = None):
+    def __init__(self, model_name: str = "sentence-transformers/LaBSE", translation_model: str = "Helsinki-NLP/opus-mt-zh-vi", device: str = None):
         self.model_name = model_name
+        self.translation_model = translation_model
         self.device = device
-        self._model = None
+        self._embed_model = None
+        self._trans_tokenizer = None
+        self._trans_model = None
 
     @property
-    def model(self):
-        if self._model is None:
+    def embed_model(self):
+        if self._embed_model is None:
             print(f"[Aligner] Loading embedding model: {self.model_name}...")
             try:
                 from sentence_transformers import SentenceTransformer
-                self._model = SentenceTransformer(self.model_name, device=self.device)
+                self._embed_model = SentenceTransformer(self.model_name, device=self.device)
             except ImportError:
-                print("[Error] sentence-transformers is not installed. Please run: pip install sentence-transformers")
+                print("[Error] sentence-transformers is not installed.")
                 raise
-        return self._model
+        return self._embed_model
+
+    def load_translation_model(self):
+        if self._trans_model is None:
+            print(f"[Aligner] Loading translation model: {self.translation_model}...")
+            try:
+                from transformers import MarianMTModel, MarianTokenizer
+                import torch
+                # Determine device
+                dev = self.device if self.device else ("cuda" if torch.cuda.is_available() else "cpu")
+                self._trans_tokenizer = MarianTokenizer.from_pretrained(self.translation_model)
+                self._trans_model = MarianMTModel.from_pretrained(self.translation_model).to(dev)
+            except Exception as e:
+                print(f"[Warning] Failed to load translation model offline: {e}. Falling back to direct embedding alignment.")
+                self._trans_model = False # Marker for failed load
+
+    def translate_han_to_viet(self, han_sentences: List[str]) -> List[str]:
+        self.load_translation_model()
+        if not self._trans_model: # False or None due to load failure
+            return han_sentences
+
+        import torch
+        dev = self.device if self.device else ("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[Aligner] Translating {len(han_sentences)} Han sentences to Viet...")
+        translated = []
+        batch_size = 32
+        
+        for i in range(0, len(han_sentences), batch_size):
+            batch = han_sentences[i:i+batch_size]
+            inputs = self._trans_tokenizer(batch, return_tensors="pt", padding=True, truncation=True).to(dev)
+            with torch.no_grad():
+                translated_tokens = self._trans_model.generate(**inputs)
+            decoded = self._trans_tokenizer.batch_decode(translated_tokens, skip_special_tokens=True)
+            translated.extend([d.strip() for d in decoded])
+            
+        return translated
 
     def align(self, han_sentences: List[str], viet_sentences: List[str]) -> List[Dict[str, str]]:
         if not han_sentences or not viet_sentences:
             return []
 
         M, N = len(han_sentences), len(viet_sentences)
-        print(f"[Aligner] Encoding {M} Han and {N} Viet sentences using {self.model_name}...")
         
-        # Encode all sentences
-        han_embeds = self.model.encode(han_sentences, convert_to_numpy=True, show_progress_bar=False)
-        viet_embeds = self.model.encode(viet_sentences, convert_to_numpy=True, show_progress_bar=False)
+        # Step 1: Translate Han sentences to Viet
+        translated_han = self.translate_han_to_viet(han_sentences)
         
-        # Normalize embeddings for cosine similarity
+        # Step 2: Encode sentences using LaBSE
+        print(f"[Aligner] Encoding translated Han and target Viet sentences using {self.model_name}...")
+        han_embeds = self.embed_model.encode(translated_han, convert_to_numpy=True, show_progress_bar=False)
+        viet_embeds = self.embed_model.encode(viet_sentences, convert_to_numpy=True, show_progress_bar=False)
+        
+        # Normalize embeddings
         han_embeds_norm = han_embeds / np.linalg.norm(han_embeds, axis=1, keepdims=True)
         viet_embeds_norm = viet_embeds / np.linalg.norm(viet_embeds, axis=1, keepdims=True)
         
         # DP matrix
-        # dp[i][j] stores the maximum score of aligning first i Han and j Viet sentences
-        # ptr[i][j] stores backtracking information:
-        #   1: 1-1 mapping (H[i-1] - V[j-1])
-        #   2: 1-2 mapping (H[i-1] - V[j-2..j-1])
-        #   3: 2-1 mapping (H[i-2..i-1] - V[j-1])
-        #   4: Delete H[i-1] (H[i-1] - None)
-        #   5: Insert V[j-1] (None - V[j-1])
-        
         dp = np.full((M + 1, N + 1), -1e9)
         ptr = np.zeros((M + 1, N + 1), dtype=int)
-        
         dp[0][0] = 0.0
         
-        # Threshold for alignment
-        threshold = 0.60
+        # DP Hyperparameters
+        threshold = 0.42
         skip_penalty = 0.05 # small penalty to avoid excessive skipping
         
         # Helper to compute normalized cosine similarity of aggregated vectors
@@ -204,7 +238,6 @@ class EmbeddingSentenceAligner(Aligner):
             return np.dot(han_embeds_norm[i], viet_embeds_norm[j])
             
         def get_sim_1_2(i, j_start, j_end):
-            # i is Han index, j_start to j_end are Viet indices
             v_agg = np.sum(viet_embeds[j_start:j_end+1], axis=0)
             norm = np.linalg.norm(v_agg)
             if norm == 0:
@@ -213,7 +246,6 @@ class EmbeddingSentenceAligner(Aligner):
             return np.dot(han_embeds_norm[i], v_agg_norm)
             
         def get_sim_2_1(i_start, i_end, j):
-            # i_start to i_end are Han indices, j is Viet index
             h_agg = np.sum(han_embeds[i_start:i_end+1], axis=0)
             norm = np.linalg.norm(h_agg)
             if norm == 0:
@@ -282,34 +314,37 @@ class EmbeddingSentenceAligner(Aligner):
         while i > 0 or j > 0:
             move = ptr[i][j]
             if move == 1: # 1-1
-                aligned_pairs.append(([i-1], [j-1]))
+                sim = get_sim_1_1(i-1, j-1)
+                aligned_pairs.append(([i-1], [j-1], sim))
                 i -= 1
                 j -= 1
             elif move == 2: # 1-2
-                aligned_pairs.append(([i-1], [j-2, j-1]))
+                sim = get_sim_1_2(i-1, j-2, j-1)
+                aligned_pairs.append(([i-1], [j-2, j-1], sim))
                 i -= 1
                 j -= 2
             elif move == 3: # 2-1
-                aligned_pairs.append(([i-2, i-1], [j-1]))
+                sim = get_sim_2_1(i-2, i-1, j-1)
+                aligned_pairs.append(([i-2, i-1], [j-1], sim))
                 i -= 2
                 j -= 1
             elif move == 4: # Skip Han
-                aligned_pairs.append(([i-1], []))
+                aligned_pairs.append(([i-1], [], 0.0))
                 i -= 1
             elif move == 5: # Skip Viet
-                aligned_pairs.append(([], [j-1]))
+                aligned_pairs.append(([], [j-1], 0.0))
                 j -= 1
             else:
-                # Safe fallback
                 if i > 0 and j > 0:
-                    aligned_pairs.append(([i-1], [j-1]))
+                    sim = get_sim_1_1(i-1, j-1)
+                    aligned_pairs.append(([i-1], [j-1], sim))
                     i -= 1
                     j -= 1
                 elif i > 0:
-                    aligned_pairs.append(([i-1], []))
+                    aligned_pairs.append(([i-1], [], 0.0))
                     i -= 1
                 else:
-                    aligned_pairs.append(([], [j-1]))
+                    aligned_pairs.append(([], [j-1], 0.0))
                     j -= 1
                     
         aligned_pairs.reverse()
@@ -317,18 +352,18 @@ class EmbeddingSentenceAligner(Aligner):
         # Format output
         results = []
         idx = 1
-        for h_idxs, v_idxs in aligned_pairs:
+        for h_idxs, v_idxs, sim in aligned_pairs:
             han_txt = " ".join([han_sentences[h] for h in h_idxs]) if h_idxs else ""
             viet_txt = " ".join([viet_sentences[v] for v in v_idxs]) if v_idxs else ""
             
-            # Avoid exporting completely empty rows
             if not han_txt and not viet_txt:
                 continue
                 
             results.append({
                 "pair_id": f"pair_{idx:06d}",
                 "han_sentence": han_txt,
-                "viet_sentence": viet_txt
+                "viet_sentence": viet_txt,
+                "similarity_score": round(float(sim), 4)
             })
             idx += 1
             

@@ -244,21 +244,21 @@ class EmbeddingSentenceAligner(Aligner):
         
         # Calculate Mutual Nearest Neighbors (MNN) constraints
         # For each Han sentence, find its top K closest Viet targets
-        K_han = min(3, N)
+        K_han = min(10, N)
         top_viets_for_han = []
         for i in range(M):
             similarities = [np.dot(han_embeds_norm[i], viet_embeds_norm[j]) for j in range(N)]
             top_viets_for_han.append(set(np.argsort(similarities)[-K_han:]))
             
         # For each Viet sentence, find its top K closest Han sources
-        K_viet = min(3, M)
+        K_viet = min(10, M)
         top_hans_for_viet = []
         for j in range(N):
             similarities = [np.dot(han_embeds_norm[i], viet_embeds_norm[j]) for i in range(M)]
             top_hans_for_viet.append(set(np.argsort(similarities)[-K_viet:]))
             
         def is_mnn(i, j):
-            return j in top_viets_for_han[i] and i in top_hans_for_viet[j]
+            return j in top_viets_for_han[i] or i in top_hans_for_viet[j]
             
         # Helper to compute normalized cosine similarity of aggregated vectors
         def get_sim_1_1(i, j):

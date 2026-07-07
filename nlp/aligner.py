@@ -147,17 +147,14 @@ class TranslationCosineAligner(Aligner):
 class EmbeddingSentenceAligner(Aligner):
     """
     Sentence-level Aligner using:
-    1. Helsinki-NLP/opus-mt-zh-vi translation model to translate Han sentences to Viet.
-    2. Multilingual Sentence Embeddings (LaBSE) to compute Cosine Similarity between Viet translation and Viet target.
-    3. Dynamic Programming for optimal m-n alignment, outputting similarity_score.
+    1. Multilingual Sentence Embeddings (LaBSE) to compute Cosine Similarity between Han and Viet directly.
+    2. Mutual Nearest Neighbor (MNN) constraints with OR operator (K=10) to support m-n alignment.
+    3. Dynamic Programming for optimal path search.
     """
-    def __init__(self, model_name: str = "sentence-transformers/LaBSE", translation_model: str = "Helsinki-NLP/opus-mt-zh-vi", device: str = None):
+    def __init__(self, model_name: str = "sentence-transformers/LaBSE", device: str = None):
         self.model_name = model_name
-        self.translation_model = translation_model
         self.device = device
         self._embed_model = None
-        self._trans_tokenizer = None
-        self._trans_model = None
 
     @property
     def embed_model(self):
@@ -171,62 +168,15 @@ class EmbeddingSentenceAligner(Aligner):
                 raise
         return self._embed_model
 
-    def load_translation_model(self):
-        if self._trans_model is None:
-            print(f"[Aligner] Loading translation model: {self.translation_model}...")
-            try:
-                from transformers import MarianMTModel, MarianTokenizer
-                import torch
-                # Determine device
-                dev = self.device if self.device else ("cuda" if torch.cuda.is_available() else "cpu")
-                self._trans_tokenizer = MarianTokenizer.from_pretrained(self.translation_model)
-                self._trans_model = MarianMTModel.from_pretrained(self.translation_model).to(dev)
-            except Exception as e:
-                print(f"[Warning] Failed to load translation model offline: {e}. Falling back to direct embedding alignment.")
-                self._trans_model = False # Marker for failed load
-
-    def translate_han_to_viet(self, han_sentences: List[str]) -> List[str]:
-        self.load_translation_model()
-        if not self._trans_model: # False or None due to load failure
-            return han_sentences
-
-        import torch
-        dev = self.device if self.device else ("cuda" if torch.cuda.is_available() else "cpu")
-        total = len(han_sentences)
-        print(f"[Aligner] Translating {total} Han sentences to Viet...")
-        translated = []
-        batch_size = 64
-        
-        for i in range(0, total, batch_size):
-            batch = han_sentences[i:i+batch_size]
-            inputs = self._trans_tokenizer(batch, return_tensors="pt", padding=True, truncation=True).to(dev)
-            with torch.no_grad():
-                translated_tokens = self._trans_model.generate(
-                    **inputs,
-                    num_beams=1,
-                    max_new_tokens=100,
-                    early_stopping=True
-                )
-            decoded = self._trans_tokenizer.batch_decode(translated_tokens, skip_special_tokens=True)
-            translated.extend([d.strip() for d in decoded])
-            
-            processed = min(i + batch_size, total)
-            print(f"  -> Translated {processed}/{total} sentences ({(processed / total) * 100:.1f}%)")
-            
-        return translated
-
     def align(self, han_sentences: List[str], viet_sentences: List[str]) -> List[Dict[str, str]]:
         if not han_sentences or not viet_sentences:
             return []
 
         M, N = len(han_sentences), len(viet_sentences)
         
-        # Step 1: Translate Han sentences to Viet
-        translated_han = self.translate_han_to_viet(han_sentences)
-        
-        # Step 2: Encode sentences using LaBSE
-        print(f"[Aligner] Encoding translated Han and target Viet sentences using {self.model_name}...")
-        han_embeds = self.embed_model.encode(translated_han, convert_to_numpy=True, show_progress_bar=False)
+        # Encode sentences using LaBSE directly
+        print(f"[Aligner] Encoding {M} Han and {N} Viet sentences using {self.model_name}...")
+        han_embeds = self.embed_model.encode(han_sentences, convert_to_numpy=True, show_progress_bar=False)
         viet_embeds = self.embed_model.encode(viet_sentences, convert_to_numpy=True, show_progress_bar=False)
         
         # Normalize embeddings
@@ -280,10 +230,10 @@ class EmbeddingSentenceAligner(Aligner):
             h_agg_norm = h_agg / norm
             return np.dot(h_agg_norm, viet_embeds_norm[j])
 
-        # Match score helpers (returns penalty for mismatches using MNN constraints)
+        # Match score helpers
         def get_score_1_1(i, j):
             if not is_mnn(i, j):
-                return -10.0 # Heavy penalty for non-mutual matches
+                return -10.0
             sim = get_sim_1_1(i, j)
             return sim - threshold if sim >= threshold else -10.0
             
@@ -326,14 +276,14 @@ class EmbeddingSentenceAligner(Aligner):
                         dp[i][j] = val
                         ptr[i][j] = 1
                         
-                # Option 2: 1-2 mapping (1 Han sentence mapped to 2 Viet sentences)
+                # Option 2: 1-2 mapping
                 if i > 0 and j > 1:
                     val = dp[i-1][j-2] + get_score_1_2(i-1, j-2, j-1)
                     if val > dp[i][j]:
                         dp[i][j] = val
                         ptr[i][j] = 2
                         
-                # Option 3: 2-1 mapping (2 Han sentences mapped to 1 Viet sentence)
+                # Option 3: 2-1 mapping
                 if i > 1 and j > 0:
                     val = dp[i-2][j-1] + get_score_2_1(i-2, i-1, j-1)
                     if val > dp[i][j]:
@@ -388,7 +338,6 @@ class EmbeddingSentenceAligner(Aligner):
         for h_idxs, v_idxs, sim in aligned_pairs:
             han_txt = " ".join([han_sentences[h] for h in h_idxs]) if h_idxs else ""
             viet_txt = " ".join([viet_sentences[v] for v in v_idxs]) if v_idxs else ""
-            trans_txt = " ".join([translated_han[h] for h in h_idxs]) if h_idxs else ""
             
             if not han_txt and not viet_txt:
                 continue
@@ -396,11 +345,9 @@ class EmbeddingSentenceAligner(Aligner):
             results.append({
                 "pair_id": f"pair_{idx:06d}",
                 "han_sentence": han_txt,
-                "translated_han": trans_txt,
                 "viet_sentence": viet_txt,
                 "similarity_score": round(float(sim), 4)
             })
             idx += 1
             
         return results
-

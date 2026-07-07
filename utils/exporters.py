@@ -26,7 +26,7 @@ class CorpusExporter:
         path = os.path.join(self.output_dir, f"{work_id}_parallel.xlsx")
         df = pd.DataFrame(aligned_data)
         if not df.empty:
-            df = df[["pair_id", "han_sentence", "translated_han", "viet_sentence", "similarity_score"]]
+            df = df[["pair_id", "han_sentence", "viet_sentence", "similarity_score"]]
         df.to_excel(path, index=False)
         print(f"Exported parallel Excel to {path}")
 
@@ -44,9 +44,9 @@ class CorpusExporter:
         
         df = pd.DataFrame(aligned_data)
         if not df.empty:
-            df = df[["pair_id", "han_sentence", "translated_han", "viet_sentence", "similarity_score"]]
+            df = df[["pair_id", "han_sentence", "viet_sentence", "similarity_score"]]
         else:
-            df = pd.DataFrame(columns=["pair_id", "han_sentence", "translated_han", "viet_sentence", "similarity_score"])
+            df = pd.DataFrame(columns=["pair_id", "han_sentence", "viet_sentence", "similarity_score"])
             
         df.to_csv(tsv_path, sep="\t", index=False, encoding="utf-8")
         df.to_excel(xlsx_path, index=False)

@@ -166,7 +166,6 @@ def process_alignment_group(
             
         volume_aligned_data[vol].append({
             "han_sentence": item["han_sentence"],
-            "translated_han": item.get("translated_han", ""),
             "viet_sentence": item["viet_sentence"],
             "similarity_score": item.get("similarity_score", 0.0)
         })
@@ -179,7 +178,6 @@ def process_alignment_group(
             formatted_aligned.append({
                 "pair_id": f"{work_code}_{vol_code}_{idx+1:06d}",
                 "han_sentence": item["han_sentence"],
-                "translated_han": item.get("translated_han", ""),
                 "viet_sentence": item["viet_sentence"],
                 "similarity_score": item.get("similarity_score", 0.0)
             })

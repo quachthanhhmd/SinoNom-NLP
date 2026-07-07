@@ -84,8 +84,11 @@ def process_alignment_group(
         for _, row in df_sino.iterrows():
             sent = str(row['sentence']).strip()
             if sent:
-                all_sino_sentences.append(sent)
-                sino_source_map.append(vol_code)
+                # Split Han sentences by whitespace to break down merged lines
+                parts = [p.strip() for p in re.split(r'\s+', sent) if p.strip()]
+                for p in parts:
+                    all_sino_sentences.append(p)
+                    sino_source_map.append(vol_code)
                 
     if not all_sino_sentences:
         print("[Warning] No Sino sentences found. Skipping group.")

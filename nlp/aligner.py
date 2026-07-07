@@ -42,14 +42,12 @@ class TranslationCosineAligner(Aligner):
             
         print("[Aligner] Translating Hán sentences to Việt for semantic matching...")
         translated = []
-        # Process in batches to avoid enormous prompts, but for simplicity here we do it all
         try:
             prompt = "Translate the following Classical Chinese/Sino-Nom sentences into modern Vietnamese. Provide ONLY the translations, one per line, matching the exact number of input lines.\n\n"
             prompt += "\n".join(han_sentences)
             response = self.model.generate_content(prompt)
             lines = response.text.strip().split('\n')
             
-            # If the model didn't return exact number, we pad or truncate
             if len(lines) < len(han_sentences):
                 lines += [""] * (len(han_sentences) - len(lines))
             elif len(lines) > len(han_sentences):
@@ -64,10 +62,8 @@ class TranslationCosineAligner(Aligner):
         if not han_sentences and not viet_sentences:
             return []
             
-        # 1. Translate
         translated_han = self.translate_han_to_viet(han_sentences)
         
-        # 2. Vectorize
         try:
             from sklearn.feature_extraction.text import TfidfVectorizer
             from sklearn.metrics.pairwise import cosine_similarity
@@ -80,22 +76,17 @@ class TranslationCosineAligner(Aligner):
         han_vecs = vectorizer.transform(translated_han)
         viet_vecs = vectorizer.transform(viet_sentences)
         
-        # similarity matrix (M x N)
         sim_matrix = cosine_similarity(han_vecs, viet_vecs)
         
-        # 3. Dynamic Programming Alignment (Needleman-Wunsch variant for sentences)
         M, N = len(han_sentences), len(viet_sentences)
         
-        # Cost matrix
         cost = np.zeros((M + 1, N + 1))
-        # Base cases (insertion/deletion penalties)
         for i in range(1, M + 1):
             cost[i, 0] = i * 0.5
         for j in range(1, N + 1):
             cost[0, j] = j * 0.5
             
-        # Pointers for backtracking
-        ptr = np.zeros((M + 1, N + 1), dtype=int) # 1: diag, 2: up, 3: left
+        ptr = np.zeros((M + 1, N + 1), dtype=int)
         
         for i in range(1, M + 1):
             for j in range(1, N + 1):
@@ -112,7 +103,6 @@ class TranslationCosineAligner(Aligner):
                 else:
                     ptr[i, j] = 3
                     
-        # Backtrack
         aligned_pairs = []
         i, j = M, N
         while i > 0 or j > 0:
@@ -121,15 +111,14 @@ class TranslationCosineAligner(Aligner):
                 i -= 1
                 j -= 1
             elif i > 0 and (j == 0 or ptr[i, j] == 2):
-                aligned_pairs.append((i-1, -1)) # Hán only
+                aligned_pairs.append((i-1, -1))
                 i -= 1
             else:
-                aligned_pairs.append((-1, j-1)) # Viet only
+                aligned_pairs.append((-1, j-1))
                 j -= 1
                 
         aligned_pairs.reverse()
         
-        # 4. Format Output
         results = []
         idx = 1
         for h_idx, v_idx in aligned_pairs:
@@ -148,7 +137,7 @@ class EmbeddingSentenceAligner(Aligner):
     """
     Sentence-level Aligner using:
     1. Multilingual Sentence Embeddings (LaBSE) to compute Cosine Similarity between Han and Viet directly.
-    2. Mutual Nearest Neighbor (MNN) constraints with OR operator (K=10) to support m-n alignment.
+    2. Mutual Nearest Neighbor (MNN) constraints with AND operator (K=3) to support high-precision alignment.
     3. Dynamic Programming for optimal path search.
     """
     def __init__(self, model_name: str = "sentence-transformers/LaBSE", device: str = None):
@@ -189,26 +178,26 @@ class EmbeddingSentenceAligner(Aligner):
         dp[0][0] = 0.0
         
         # DP Hyperparameters
-        threshold = 0.35 # low baseline filter since MNN handles precision
+        threshold = 0.42 # optimal threshold for direct LaBSE on split sentences
         skip_penalty = 0.05 # small penalty to avoid excessive skipping
         
         # Calculate Mutual Nearest Neighbors (MNN) constraints
         # For each Han sentence, find its top K closest Viet targets
-        K_han = min(10, N)
+        K_han = min(3, N)
         top_viets_for_han = []
         for i in range(M):
             similarities = [np.dot(han_embeds_norm[i], viet_embeds_norm[j]) for j in range(N)]
             top_viets_for_han.append(set(np.argsort(similarities)[-K_han:]))
             
         # For each Viet sentence, find its top K closest Han sources
-        K_viet = min(10, M)
+        K_viet = min(3, M)
         top_hans_for_viet = []
         for j in range(N):
             similarities = [np.dot(han_embeds_norm[i], viet_embeds_norm[j]) for i in range(M)]
             top_hans_for_viet.append(set(np.argsort(similarities)[-K_viet:]))
             
         def is_mnn(i, j):
-            return j in top_viets_for_han[i] or i in top_hans_for_viet[j]
+            return j in top_viets_for_han[i] and i in top_hans_for_viet[j]
             
         # Helper to compute normalized cosine similarity of aggregated vectors
         def get_sim_1_1(i, j):

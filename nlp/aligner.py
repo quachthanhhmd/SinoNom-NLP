@@ -192,17 +192,26 @@ class EmbeddingSentenceAligner(Aligner):
 
         import torch
         dev = self.device if self.device else ("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"[Aligner] Translating {len(han_sentences)} Han sentences to Viet...")
+        total = len(han_sentences)
+        print(f"[Aligner] Translating {total} Han sentences to Viet...")
         translated = []
-        batch_size = 32
+        batch_size = 64
         
-        for i in range(0, len(han_sentences), batch_size):
+        for i in range(0, total, batch_size):
             batch = han_sentences[i:i+batch_size]
             inputs = self._trans_tokenizer(batch, return_tensors="pt", padding=True, truncation=True).to(dev)
             with torch.no_grad():
-                translated_tokens = self._trans_model.generate(**inputs)
+                translated_tokens = self._trans_model.generate(
+                    **inputs,
+                    num_beams=1,
+                    max_new_tokens=100,
+                    early_stopping=True
+                )
             decoded = self._trans_tokenizer.batch_decode(translated_tokens, skip_special_tokens=True)
             translated.extend([d.strip() for d in decoded])
+            
+            processed = min(i + batch_size, total)
+            print(f"  -> Translated {processed}/{total} sentences ({(processed / total) * 100:.1f}%)")
             
         return translated
 

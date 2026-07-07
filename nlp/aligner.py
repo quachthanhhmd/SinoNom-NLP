@@ -143,3 +143,180 @@ class TranslationCosineAligner(Aligner):
             idx += 1
             
         return results
+
+class EmbeddingSentenceAligner(Aligner):
+    """
+    Sentence-level Aligner using Multilingual Sentence Embeddings (LaBSE / Multilingual E5)
+    and Dynamic Programming supporting m-n alignment.
+    """
+    def __init__(self, model_name: str = "sentence-transformers/LaBSE", device: str = None):
+        self.model_name = model_name
+        self.device = device
+        self._model = None
+
+    @property
+    def model(self):
+        if self._model is None:
+            print(f"[Aligner] Loading embedding model: {self.model_name}...")
+            try:
+                from sentence_transformers import SentenceTransformer
+                self._model = SentenceTransformer(self.model_name, device=self.device)
+            except ImportError:
+                print("[Error] sentence-transformers is not installed. Please run: pip install sentence-transformers")
+                raise
+        return self._model
+
+    def align(self, han_sentences: List[str], viet_sentences: List[str]) -> List[Dict[str, str]]:
+        if not han_sentences or not viet_sentences:
+            return []
+
+        M, N = len(han_sentences), len(viet_sentences)
+        print(f"[Aligner] Encoding {M} Han and {N} Viet sentences using {self.model_name}...")
+        
+        # Encode all sentences
+        han_embeds = self.model.encode(han_sentences, convert_to_numpy=True, show_progress_bar=False)
+        viet_embeds = self.model.encode(viet_sentences, convert_to_numpy=True, show_progress_bar=False)
+        
+        # Normalize embeddings for cosine similarity
+        han_embeds_norm = han_embeds / np.linalg.norm(han_embeds, axis=1, keepdims=True)
+        viet_embeds_norm = viet_embeds / np.linalg.norm(viet_embeds, axis=1, keepdims=True)
+        
+        # DP matrix
+        # dp[i][j] stores the maximum score of aligning first i Han and j Viet sentences
+        # ptr[i][j] stores backtracking information:
+        #   1: 1-1 mapping (H[i-1] - V[j-1])
+        #   2: 1-2 mapping (H[i-1] - V[j-2..j-1])
+        #   3: 2-1 mapping (H[i-2..i-1] - V[j-1])
+        #   4: Delete H[i-1] (H[i-1] - None)
+        #   5: Insert V[j-1] (None - V[j-1])
+        
+        dp = np.full((M + 1, N + 1), -1e9)
+        ptr = np.zeros((M + 1, N + 1), dtype=int)
+        
+        dp[0][0] = 0.0
+        
+        # Penalties
+        skip_penalty = 0.0 # penalty for skipping a sentence
+        
+        # Helper to compute normalized cosine similarity of aggregated vectors
+        def get_sim_1_1(i, j):
+            return np.dot(han_embeds_norm[i], viet_embeds_norm[j])
+            
+        def get_sim_1_2(i, j_start, j_end):
+            # i is Han index, j_start to j_end are Viet indices
+            v_agg = np.sum(viet_embeds[j_start:j_end+1], axis=0)
+            norm = np.linalg.norm(v_agg)
+            if norm == 0:
+                return 0.0
+            v_agg_norm = v_agg / norm
+            return np.dot(han_embeds_norm[i], v_agg_norm)
+            
+        def get_sim_2_1(i_start, i_end, j):
+            # i_start to i_end are Han indices, j is Viet index
+            h_agg = np.sum(han_embeds[i_start:i_end+1], axis=0)
+            norm = np.linalg.norm(h_agg)
+            if norm == 0:
+                return 0.0
+            h_agg_norm = h_agg / norm
+            return np.dot(h_agg_norm, viet_embeds_norm[j])
+
+        # Fill DP table
+        for i in range(M + 1):
+            for j in range(N + 1):
+                if i == 0 and j == 0:
+                    continue
+                
+                # Option 4: Skip Han (H[i-1] mapped to empty)
+                if i > 0:
+                    val = dp[i-1][j] - skip_penalty
+                    if val > dp[i][j]:
+                        dp[i][j] = val
+                        ptr[i][j] = 4
+                        
+                # Option 5: Skip Viet (V[j-1] mapped to empty)
+                if j > 0:
+                    val = dp[i][j-1] - skip_penalty
+                    if val > dp[i][j]:
+                        dp[i][j] = val
+                        ptr[i][j] = 5
+                        
+                # Option 1: 1-1 mapping
+                if i > 0 and j > 0:
+                    val = dp[i-1][j-1] + get_sim_1_1(i-1, j-1)
+                    if val > dp[i][j]:
+                        dp[i][j] = val
+                        ptr[i][j] = 1
+                        
+                # Option 2: 1-2 mapping (1 Han sentence mapped to 2 Viet sentences)
+                if i > 0 and j > 1:
+                    val = dp[i-1][j-2] + get_sim_1_2(i-1, j-2, j-1)
+                    if val > dp[i][j]:
+                        dp[i][j] = val
+                        ptr[i][j] = 2
+                        
+                # Option 3: 2-1 mapping (2 Han sentences mapped to 1 Viet sentence)
+                if i > 1 and j > 0:
+                    val = dp[i-2][j-1] + get_sim_2_1(i-2, i-1, j-1)
+                    if val > dp[i][j]:
+                        dp[i][j] = val
+                        ptr[i][j] = 3
+
+        # Backtracking
+        i, j = M, N
+        aligned_pairs = []
+        
+        while i > 0 or j > 0:
+            move = ptr[i][j]
+            if move == 1: # 1-1
+                aligned_pairs.append(([i-1], [j-1]))
+                i -= 1
+                j -= 1
+            elif move == 2: # 1-2
+                aligned_pairs.append(([i-1], [j-2, j-1]))
+                i -= 1
+                j -= 2
+            elif move == 3: # 2-1
+                aligned_pairs.append(([i-2, i-1], [j-1]))
+                i -= 2
+                j -= 1
+            elif move == 4: # Skip Han
+                aligned_pairs.append(([i-1], []))
+                i -= 1
+            elif move == 5: # Skip Viet
+                aligned_pairs.append(([], [j-1]))
+                j -= 1
+            else:
+                # Safe fallback
+                if i > 0 and j > 0:
+                    aligned_pairs.append(([i-1], [j-1]))
+                    i -= 1
+                    j -= 1
+                elif i > 0:
+                    aligned_pairs.append(([i-1], []))
+                    i -= 1
+                else:
+                    aligned_pairs.append(([], [j-1]))
+                    j -= 1
+                    
+        aligned_pairs.reverse()
+        
+        # Format output
+        results = []
+        idx = 1
+        for h_idxs, v_idxs in aligned_pairs:
+            han_txt = " ".join([han_sentences[h] for h in h_idxs]) if h_idxs else ""
+            viet_txt = " ".join([viet_sentences[v] for v in v_idxs]) if v_idxs else ""
+            
+            # Avoid exporting completely empty rows
+            if not han_txt and not viet_txt:
+                continue
+                
+            results.append({
+                "pair_id": f"pair_{idx:06d}",
+                "han_sentence": han_txt,
+                "viet_sentence": viet_txt
+            })
+            idx += 1
+            
+        return results
+

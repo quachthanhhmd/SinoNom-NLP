@@ -1,0 +1,343 @@
+import os
+import re
+import pandas as pd
+import argparse
+from typing import List, Dict, Tuple
+from nlp.aligner import EmbeddingSentenceAligner
+from utils.exporters import CorpusExporter
+
+def clean_vietnamese_sentence(sentence: str) -> bool:
+    """
+    Returns True if the sentence is a valid content sentence, 
+    False if it looks like a heading/metadata (e.g., 'QUYỂN II', 'PHỦ THỪA THIÊN').
+    """
+    if not isinstance(sentence, str):
+        return False
+    sentence = sentence.strip()
+    if not sentence:
+        return False
+    
+    # 1. Skip extremely short strings (usually page numbers or table junk)
+    if len(sentence) < 6:
+        return False
+        
+    # 2. Skip typical uppercase metadata titles / headings (length constraint to avoid skipping short real sentences)
+    # Check if mostly uppercase and short
+    words = sentence.split()
+    uppercase_words = [w for w in words if w.isupper() or not w.isalpha()]
+    if len(uppercase_words) / len(words) > 0.8 and len(sentence) < 45:
+        return False
+        
+    # 3. Check for typical structural headings in Sino-Nom texts
+    heading_keywords = [
+        r"^quyển\s+(?:[ivxlcdm]+|\d+)",
+        r"^quyển\s+thứ\s+[a-ăâb-đe-êg-hi-k-l-m-n-o-ô-ơp-qr-s-t-u-ưv-xy]+",
+        r"^tỉnh\s+[a-ăâb-đe-êg-hi-k-l-m-n-o-ô-ơp-qr-s-t-u-ưv-xy\-\s]+",
+        r"^phủ\s+[a-ăâb-đe-êg-hi-k-l-m-n-o-ô-ơp-qr-s-t-u-ưv-xy\-\s]+",
+        r"^đại\s*-\s*nam\s+nhất\s*-\s*thống\s*-\s*chí",
+        r"^đại\s+nam\s+nhất\s+thống\s+chí",
+        r"^dựng\s+đặt\s+và\s+diên\s+cách",
+        r"^phân\s+dã",
+        r"^khí\s+hậu",
+        r"^thành\s*-\s*trì",
+        r"^tử\s*-\s*chí",
+        r"^sông\s+núi",
+        r"^danh\s+lam",
+        r"^cổ\s+tự",
+        r"^sản\s+vật",
+        r"^nhân\s+vật"
+    ]
+    
+    sentence_lower = sentence.lower()
+    for kw in heading_keywords:
+        if re.search(kw, sentence_lower):
+            return False
+            
+    return True
+
+def process_alignment_group(
+    sino_files: List[Tuple[str, str]], # list of (volume_code_str, filepath) e.g., [("02", "q2_sentences.csv")]
+    viet_file: str,
+    aligner: EmbeddingSentenceAligner,
+    exporter: CorpusExporter,
+    work_code: str
+):
+    print(f"\n=======================================================")
+    print(f"Aligning Sino files: {[f[1] for f in sino_files]}")
+    print(f"With Viet file: {viet_file}")
+    print(f"=======================================================")
+    
+    # 1. Read Sino sentences and track their source volumes
+    all_sino_sentences = []
+    sino_source_map = [] # tracks which index in all_sino_sentences belongs to which volume code
+    
+    for vol_code, sino_path in sino_files:
+        if not os.path.exists(sino_path):
+            print(f"[Error] Sino file not found: {sino_path}")
+            continue
+        df_sino = pd.read_csv(sino_path)
+        # Ensure column 'sentence' exists
+        if 'sentence' not in df_sino.columns:
+            print(f"[Error] Column 'sentence' missing in {sino_path}")
+            continue
+            
+        for _, row in df_sino.iterrows():
+            sent = str(row['sentence']).strip()
+            if sent:
+                all_sino_sentences.append(sent)
+                sino_source_map.append(vol_code)
+                
+    if not all_sino_sentences:
+        print("[Warning] No Sino sentences found. Skipping group.")
+        return
+        
+    # 2. Read and filter Vietnamese sentences
+    if not os.path.exists(viet_file):
+        print(f"[Error] Viet file not found: {viet_file}")
+        return
+        
+    df_viet = pd.read_csv(viet_file)
+    if 'sentence' not in df_viet.columns:
+        print(f"[Error] Column 'sentence' missing in {viet_file}")
+        return
+        
+    viet_sentences = []
+    for _, row in df_viet.iterrows():
+        sent = str(row['sentence']).strip()
+        if clean_vietnamese_sentence(sent):
+            viet_sentences.append(sent)
+            
+    if not viet_sentences:
+        print("[Warning] No valid Vietnamese sentences found after cleaning. Skipping group.")
+        return
+        
+    print(f"Total Han sentences to align: {len(all_sino_sentences)}")
+    print(f"Total Viet sentences to align (after cleaning): {len(viet_sentences)}")
+    
+    # 3. Perform Alignment
+    raw_aligned = aligner.align(all_sino_sentences, viet_sentences)
+    
+    # 4. Map the aligned pairs back to their respective volumes
+    # Backtrack aligned sentences using the original indices to figure out the volume
+    # raw_aligned is a list of {'pair_id': ..., 'han_sentence': ..., 'viet_sentence': ...}
+    # However, since the aligner might have concatenated m-n sentences, we should be careful.
+    # To map accurately, let's keep track of Han sentence indices.
+    
+    # Let's recreate alignment with indices mapping by running a quick match.
+    # This allows us to divide the aligned results back into their original volumes.
+    volume_aligned_data = {} # vol_code -> list of aligned dicts
+    
+    # First, let's build a lookup dictionary for all_sino_sentences to find their volume code.
+    # Since we mapped them sequentially, we can track them.
+    # We can reconstruct the alignment with index markers.
+    
+    # We run the aligner again but we extract the index mapping by matching the text
+    # Or more robustly, we can modify the aligner to return index mappings.
+    # To keep code clean, let's do text matching. Since Hán sentences are mostly unique in a book, 
+    # we can search for the first Hán sentence in the aligned block to identify its volume.
+    
+    # Let's write a helper to match a Han sentence string back to its index in all_sino_sentences.
+    # Because sentences in the aligned block might be merged (e.g. "Sent1 Sent2"), we find the first sentence.
+    current_vol = sino_source_map[0] # Default fallback
+    
+    # We will split the aligned data by matching the Hán sentences
+    for item in raw_aligned:
+        han_txt = item["han_sentence"]
+        if not han_txt:
+            # If Hán is empty (Viet-only sentence), we assign it to the last active volume
+            vol = current_vol
+        else:
+            # Find which volume this Han sentence belongs to
+            # To handle merged sentences, we split and match
+            first_sentence_part = han_txt.split("。")[0] + "。"
+            matched_vol = None
+            for idx, orig_sent in enumerate(all_sino_sentences):
+                if first_sentence_part in orig_sent or orig_sent in han_txt:
+                    matched_vol = sino_source_map[idx]
+                    break
+            if matched_vol:
+                vol = matched_vol
+                current_vol = matched_vol
+            else:
+                vol = current_vol
+                
+        if vol not in volume_aligned_data:
+            volume_aligned_data[vol] = []
+            
+        volume_aligned_data[vol].append({
+            "han_sentence": item["han_sentence"],
+            "viet_sentence": item["viet_sentence"]
+        })
+        
+    # 5. Export each volume to its hierarchical directory
+    for vol_code, aligned_list in volume_aligned_data.items():
+        # Re-number the pair_ids for this specific volume starting at 1
+        formatted_aligned = []
+        for idx, item in enumerate(aligned_list):
+            formatted_aligned.append({
+                "pair_id": f"{work_code}_{vol_code}_{idx+1:06d}",
+                "han_sentence": item["han_sentence"],
+                "viet_sentence": item["viet_sentence"]
+            })
+            
+        print(f"Exporting Volume {vol_code} with {len(formatted_aligned)} aligned pairs...")
+        exporter.export_hierarchical(
+            parent_dir=work_code,
+            chapter_str=vol_code,
+            aligned_data=formatted_aligned
+        )
+def main():
+    parser = argparse.ArgumentParser(description="Hán-Việt Sentence Alignment Orchestrator")
+    parser.add_argument("--sino_dir", type=str, default="dataset/MAPPING/sino_extract", help="Sino extract directory")
+    parser.add_argument("--viet_dir", type=str, default="dataset/MAPPING/vietnam_extract/csv", help="Viet extract CSV directory")
+    parser.add_argument("--output_dir", type=str, default="output", help="Output directory")
+    parser.add_argument("--work_code", type=str, default="HVB_001", help="Parent work code (e.g., HVB_001)")
+    parser.add_argument("--model", type=str, default="sentence-transformers/LaBSE", help="Multilingual embedding model to use")
+    parser.add_argument("--device", type=str, default=None, help="Device to run embedding on (cpu/cuda)")
+    parser.add_argument("--dev", action="store_true", help="Run in dev mode (only align the first group/Volume 1 for testing)")
+    
+    args = parser.parse_args()
+    
+    # 1. Initialize Aligner and Exporter
+    aligner = EmbeddingSentenceAligner(model_name=args.model, device=args.device)
+    exporter = CorpusExporter(output_dir=args.output_dir)
+    
+    # 2. Define the Mapping Groups based on the reviewed correspondence table
+    # Each group: (List of (volume_code, sino_csv_filename), viet_csv_filename)
+    mapping_groups = [
+        # Quyển 1
+        ([("01", "q1_sentences.csv")], "q01.csv"),
+        
+        # Quyển 2, 3, 4 -> mapped to the filtered quyen2 file
+        ([
+            ("02", "q2_sentences.csv"),
+            ("03", "q3_sentences.csv"),
+            ("04", "q4_sentences.csv")
+         ], "q2_3_4_quyen2.csv"),
+        
+        # Quyển 5
+        ([("05", "q5_sentences.csv")], "q05.csv"),
+        
+        # Quyển 6 -> mapped to the filtered quyen8 file
+        ([("06", "q6_sentences.csv")], "q6_quyen8.csv"),
+        
+        # Quyển 7, 8
+        ([
+            ("07", "q7_sentences.csv"),
+            ("08", "q8_sentences.csv")
+         ], "q07_08.csv"),
+         
+        # Quyển 9
+        ([("09", "q9_sentences.csv")], "q09.csv"),
+        
+        # Quyển 10, 11 -> Hán has q10_11_sentences.csv. We split them into "10" and "11" outputs dynamically
+        ([
+            ("10", "q10_11_sentences.csv") # They are stored in one file, we mark them as "10" temporarily.
+                                            # We will handle sub-volume naming inside the sino file.
+         ], "q10_11.csv"),
+         
+        # Quyển 12
+        ([("12", "q12_sentences.csv")], "q12.csv"),
+        
+        # Quyển 13
+        ([("13", "q13_sentences.csv")], "q13.csv"),
+        
+        # Quyển 14, 15
+        ([
+            ("14", "q14_sentences.csv"),
+            ("15", "q15_sentences.csv")
+         ], "q14_15.csv"),
+         
+        # Quyển 16, 17
+        ([
+            ("16", "q16_17_sentences.csv")
+         ], "q16_17.csv")
+    ]
+    
+    # 3. Process each group
+    if args.dev:
+        print("[Dev Mode] Running only the first group (Volume 1) for quick verification...")
+        mapping_groups = mapping_groups[:1]
+        
+    for sino_info, viet_filename in mapping_groups:
+        # Construct full paths
+        sino_files = []
+        for vol_code, fname in sino_info:
+            sino_files.append((vol_code, os.path.join(args.sino_dir, fname)))
+            
+        viet_file = os.path.join(args.viet_dir, viet_filename)
+        
+        # Special logic for q10_11 and q16_17 since the sino file contains multiple volumes.
+        # We want to dynamically split the output volume code based on sentence IDs if possible.
+        # e.g., IDs in q10_11_sentences.csv start with Q10_... and Q11_...
+        # Let's inspect the ID column in the sino file to split the volume codes accurately.
+        if len(sino_info) == 1 and sino_info[0][1] in ["q10_11_sentences.csv", "q16_17_sentences.csv"]:
+            fname = sino_info[0][1]
+            sino_path = os.path.join(args.sino_dir, fname)
+            
+            if os.path.exists(sino_path):
+                print(f"\n--- Special handling for merged volume Hán file: {fname} ---")
+                df_temp = pd.read_csv(sino_path)
+                
+                # Check IDs to split
+                # e.g., ID format: Q10_2_001 -> volume "10", Q11_3_001 -> volume "11"
+                # e.g., ID format: Q16_... -> volume "16", Q17_... -> volume "17"
+                # We can group sentences by their volume prefix from the ID column.
+                vol_sentences = {} # vol_code -> list of sentences
+                
+                for _, row in df_temp.iterrows():
+                    sent_id = str(row['ID'])
+                    sentence = str(row['sentence']).strip()
+                    if not sentence:
+                        continue
+                    # extract volume number from ID like "Q10_2_001" -> "10"
+                    match = re.match(r"[qQ](\d+)_", sent_id)
+                    if match:
+                        vol_num = f"{int(match.group(1)):02d}"
+                    else:
+                        # Fallback based on filename
+                        vol_num = "10" if "10" in fname else "16"
+                        
+                    if vol_num not in vol_sentences:
+                        vol_sentences[vol_num] = []
+                    vol_sentences[vol_num].append(sentence)
+                
+                # Now we write temporary split CSV files so we can reuse the process_alignment_group logic!
+                temp_sino_files = []
+                for vol_num, sents in vol_sentences.items():
+                    temp_csv_path = os.path.join(args.sino_dir, f"temp_split_{vol_num}.csv")
+                    pd.DataFrame({"sentence": sents}).to_csv(temp_csv_path, index=False)
+                    temp_sino_files.append((vol_num, temp_csv_path))
+                
+                # Sort temp files so volume "10" comes before "11", and "16" before "17"
+                temp_sino_files.sort(key=lambda x: x[0])
+                
+                # Run alignment
+                process_alignment_group(
+                    sino_files=temp_sino_files,
+                    viet_file=viet_file,
+                    aligner=aligner,
+                    exporter=exporter,
+                    work_code=args.work_code
+                )
+                
+                # Clean up temporary split files
+                for _, temp_path in temp_sino_files:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+            else:
+                print(f"[Error] Merged sino file not found: {sino_path}")
+        else:
+            # Normal group processing
+            process_alignment_group(
+                sino_files=sino_files,
+                viet_file=viet_file,
+                aligner=aligner,
+                exporter=exporter,
+                work_code=args.work_code
+            )
+
+    print("\nMapping phase completed successfully!")
+
+if __name__ == "__main__":
+    main()

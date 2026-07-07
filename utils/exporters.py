@@ -29,3 +29,26 @@ class CorpusExporter:
             df = df[["pair_id", "han_sentence", "viet_sentence"]]
         df.to_excel(path, index=False)
         print(f"Exported parallel Excel to {path}")
+
+    def export_hierarchical(self, parent_dir: str, chapter_str: str, aligned_data: List[Dict[str, str]]):
+        """
+        Exports parallel TSV and Excel files into a hierarchical directory structure:
+        output_dir / parent_dir / parent_dir_chapter / parent_dir_chapter_parallel.tsv
+        Example: output / HVB_001 / HVB_001_01 / HVB_001_01_parallel.tsv
+        """
+        target_dir = os.path.join(self.output_dir, parent_dir, f"{parent_dir}_{chapter_str}")
+        os.makedirs(target_dir, exist_ok=True)
+        
+        tsv_path = os.path.join(target_dir, f"{parent_dir}_{chapter_str}_parallel.tsv")
+        xlsx_path = os.path.join(target_dir, f"{parent_dir}_{chapter_str}_parallel.xlsx")
+        
+        df = pd.DataFrame(aligned_data)
+        if not df.empty:
+            df = df[["pair_id", "han_sentence", "viet_sentence"]]
+        else:
+            df = pd.DataFrame(columns=["pair_id", "han_sentence", "viet_sentence"])
+            
+        df.to_csv(tsv_path, sep="\t", index=False, encoding="utf-8")
+        df.to_excel(xlsx_path, index=False)
+        print(f"Exported hierarchical outputs to: {target_dir}")
+

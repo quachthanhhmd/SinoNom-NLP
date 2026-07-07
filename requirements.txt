@@ -11,3 +11,4 @@ requests
 Pillow
 numpy
 opencv-python
+sentence-transformers

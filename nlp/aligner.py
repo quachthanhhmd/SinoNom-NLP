@@ -239,9 +239,27 @@ class EmbeddingSentenceAligner(Aligner):
         dp[0][0] = 0.0
         
         # DP Hyperparameters
-        threshold = 0.42
+        threshold = 0.35 # low baseline filter since MNN handles precision
         skip_penalty = 0.05 # small penalty to avoid excessive skipping
         
+        # Calculate Mutual Nearest Neighbors (MNN) constraints
+        # For each Han sentence, find its top K closest Viet targets
+        K_han = min(3, N)
+        top_viets_for_han = []
+        for i in range(M):
+            similarities = [np.dot(han_embeds_norm[i], viet_embeds_norm[j]) for j in range(N)]
+            top_viets_for_han.append(set(np.argsort(similarities)[-K_han:]))
+            
+        # For each Viet sentence, find its top K closest Han sources
+        K_viet = min(3, M)
+        top_hans_for_viet = []
+        for j in range(N):
+            similarities = [np.dot(han_embeds_norm[i], viet_embeds_norm[j]) for i in range(M)]
+            top_hans_for_viet.append(set(np.argsort(similarities)[-K_viet:]))
+            
+        def is_mnn(i, j):
+            return j in top_viets_for_han[i] and i in top_hans_for_viet[j]
+            
         # Helper to compute normalized cosine similarity of aggregated vectors
         def get_sim_1_1(i, j):
             return np.dot(han_embeds_norm[i], viet_embeds_norm[j])
@@ -262,18 +280,24 @@ class EmbeddingSentenceAligner(Aligner):
             h_agg_norm = h_agg / norm
             return np.dot(h_agg_norm, viet_embeds_norm[j])
 
-        # Match score helpers (returns penalty for mismatches)
+        # Match score helpers (returns penalty for mismatches using MNN constraints)
         def get_score_1_1(i, j):
+            if not is_mnn(i, j):
+                return -10.0 # Heavy penalty for non-mutual matches
             sim = get_sim_1_1(i, j)
-            return sim - threshold if sim >= threshold else -1.0
+            return sim - threshold if sim >= threshold else -10.0
             
         def get_score_1_2(i, j_start, j_end):
+            if not (is_mnn(i, j_start) or is_mnn(i, j_end)):
+                return -10.0
             sim = get_sim_1_2(i, j_start, j_end)
-            return sim - threshold if sim >= threshold else -1.0
+            return sim - threshold if sim >= threshold else -10.0
             
         def get_score_2_1(i_start, i_end, j):
+            if not (is_mnn(i_start, j) or is_mnn(i_end, j)):
+                return -10.0
             sim = get_sim_2_1(i_start, i_end, j)
-            return sim - threshold if sim >= threshold else -1.0
+            return sim - threshold if sim >= threshold else -10.0
 
         # Fill DP table
         for i in range(M + 1):
@@ -364,6 +388,7 @@ class EmbeddingSentenceAligner(Aligner):
         for h_idxs, v_idxs, sim in aligned_pairs:
             han_txt = " ".join([han_sentences[h] for h in h_idxs]) if h_idxs else ""
             viet_txt = " ".join([viet_sentences[v] for v in v_idxs]) if v_idxs else ""
+            trans_txt = " ".join([translated_han[h] for h in h_idxs]) if h_idxs else ""
             
             if not han_txt and not viet_txt:
                 continue
@@ -371,6 +396,7 @@ class EmbeddingSentenceAligner(Aligner):
             results.append({
                 "pair_id": f"pair_{idx:06d}",
                 "han_sentence": han_txt,
+                "translated_han": trans_txt,
                 "viet_sentence": viet_txt,
                 "similarity_score": round(float(sim), 4)
             })

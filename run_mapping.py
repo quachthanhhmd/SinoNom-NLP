@@ -6,6 +6,17 @@ from typing import List, Dict, Tuple
 from nlp.aligner import EmbeddingSentenceAligner
 from utils.exporters import CorpusExporter
 
+def detect_separator(file_path: str) -> str:
+    """Detects if a CSV file uses ',' or ';' as a separator."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            first_line = f.readline()
+            if ';' in first_line:
+                return ';'
+    except Exception:
+        pass
+    return ','
+
 def clean_vietnamese_sentence(sentence: str) -> bool:
     """
     Returns True if the sentence is a valid content sentence, 
@@ -75,7 +86,8 @@ def process_alignment_group(
         if not os.path.exists(sino_path):
             print(f"[Error] Sino file not found: {sino_path}")
             continue
-        df_sino = pd.read_csv(sino_path)
+        sep = detect_separator(sino_path)
+        df_sino = pd.read_csv(sino_path, sep=sep)
         # Ensure column 'sentence' exists
         if 'sentence' not in df_sino.columns:
             print(f"[Error] Column 'sentence' missing in {sino_path}")
@@ -282,7 +294,8 @@ def main():
             
             if os.path.exists(sino_path):
                 print(f"\n--- Special handling for merged volume Hán file: {fname} ---")
-                df_temp = pd.read_csv(sino_path)
+                sep = detect_separator(sino_path)
+                df_temp = pd.read_csv(sino_path, sep=sep)
                 
                 # Check IDs to split
                 # e.g., ID format: Q10_2_001 -> volume "10", Q11_3_001 -> volume "11"

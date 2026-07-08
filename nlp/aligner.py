@@ -177,7 +177,7 @@ class EmbeddingSentenceAligner(Aligner):
         dp[0][0] = 0.0
         
         # DP Hyperparameters
-        threshold = 0.43 # optimal absolute similarity threshold for direct LaBSE on split sentences
+        threshold = 0.38 # lowered threshold to capture long-short alignments securely after preface filtering
         skip_penalty = 0.05 # small penalty to avoid excessive skipping
         
         # Helper to compute normalized cosine similarity of aggregated vectors

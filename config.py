@@ -59,7 +59,7 @@ ENSEMBLE_CONFIG = {
         "uncertain_low": 0.32,
         "uncertain_high": 0.50,
         "keep_threshold": 3,
-        "batch_size": 32,
+        "batch_size": 8,
     },
 }
 

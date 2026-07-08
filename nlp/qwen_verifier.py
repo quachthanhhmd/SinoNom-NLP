@@ -173,29 +173,67 @@ Câu Việt: {viet}
                 pair = aligned_pairs[idx]
                 prompts.append(self._build_prompt(pair["han_sentence"], pair["viet_sentence"]))
 
-            # Tokenize batch
-            inputs = self._tokenizer(prompts, return_tensors="pt", padding=True).to(self._model.device)
-
-            # Generate
             import torch
-            with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=10,
-                    do_sample=False,  # deterministic greedy decoding for rating
-                    pad_token_id=self._tokenizer.eos_token_id,
-                )
+            try:
+                # Tokenize batch
+                inputs = self._tokenizer(prompts, return_tensors="pt", padding=True).to(self._model.device)
 
-            # Decode responses
-            input_len = inputs.input_ids.shape[1]
-            for i, idx in enumerate(batch_indices):
-                response_tokens = outputs[i][input_len:]
-                response_text = self._tokenizer.decode(response_tokens, skip_special_tokens=True)
-                score = self._parse_score(response_text)
+                # Generate
+                with torch.no_grad():
+                    outputs = self._model.generate(
+                        **inputs,
+                        max_new_tokens=10,
+                        do_sample=False,  # deterministic greedy decoding for rating
+                        pad_token_id=self._tokenizer.eos_token_id,
+                    )
 
-                # Set results
-                aligned_pairs[idx]["qwen_score"] = score
-                aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
+                # Decode responses
+                input_len = inputs.input_ids.shape[1]
+                for i, idx in enumerate(batch_indices):
+                    response_tokens = outputs[i][input_len:]
+                    response_text = self._tokenizer.decode(response_tokens, skip_special_tokens=True)
+                    score = self._parse_score(response_text)
+
+                    # Set results
+                    aligned_pairs[idx]["qwen_score"] = score
+                    aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
+
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e):
+                    print(f"[Qwen] Warning: CUDA Out of Memory with batch_size={len(prompts)}. Falling back to sequential execution (batch_size=1) for this batch...")
+                    torch.cuda.empty_cache()
+                    
+                    # Process sequentially
+                    for idx in batch_indices:
+                        pair = aligned_pairs[idx]
+                        p_prompt = self._build_prompt(pair["han_sentence"], pair["viet_sentence"])
+                        p_inputs = self._tokenizer([p_prompt], return_tensors="pt").to(self._model.device)
+                        
+                        try:
+                            with torch.no_grad():
+                                p_outputs = self._model.generate(
+                                    **p_inputs,
+                                    max_new_tokens=10,
+                                    do_sample=False,
+                                    pad_token_id=self._tokenizer.eos_token_id,
+                                )
+                            p_input_len = p_inputs.input_ids.shape[1]
+                            p_response_tokens = p_outputs[0][p_input_len:]
+                            p_response_text = self._tokenizer.decode(p_response_tokens, skip_special_tokens=True)
+                            score = self._parse_score(p_response_text)
+                            
+                            aligned_pairs[idx]["qwen_score"] = score
+                            aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
+                        except RuntimeError as p_e:
+                            if "CUDA out of memory" in str(p_e):
+                                print("[Qwen] Critical: CUDA Out of Memory even with batch_size=1! Skipping verification for this pair.")
+                                torch.cuda.empty_cache()
+                                aligned_pairs[idx]["qwen_score"] = 0
+                                aligned_pairs[idx]["verified"] = False
+                            else:
+                                raise p_e
+                else:
+                    raise e
 
             processed += len(batch_indices)
             print(f"[Qwen] Processed {processed}/{total_uncertain} uncertain pairs...")

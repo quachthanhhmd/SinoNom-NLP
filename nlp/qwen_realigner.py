@@ -303,25 +303,35 @@ Kết quả dóng hàng (JSON array):
 
             prompt = self._build_realign_prompt(cluster_han, cluster_viet)
 
-            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
             import torch
-            with torch.no_grad():
-                output_tokens = self._model.generate(
-                    **inputs,
-                    # Allow enough tokens for a JSON response. 50 tokens per pair typically.
-                    max_new_tokens=min(50 * (len(cluster_han) + len(cluster_viet)), 1024),
-                    do_sample=False,
-                    pad_token_id=self._tokenizer.eos_token_id,
+            try:
+                inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+                with torch.no_grad():
+                    output_tokens = self._model.generate(
+                        **inputs,
+                        # Allow enough tokens for a JSON response. 50 tokens per pair typically.
+                        max_new_tokens=min(50 * (len(cluster_han) + len(cluster_viet)), 1024),
+                        do_sample=False,
+                        pad_token_id=self._tokenizer.eos_token_id,
+                    )
+
+                input_len = inputs.input_ids.shape[1]
+                response_text = self._tokenizer.decode(
+                    output_tokens[0][input_len:], skip_special_tokens=True
                 )
 
-            input_len = inputs.input_ids.shape[1]
-            response_text = self._tokenizer.decode(
-                output_tokens[0][input_len:], skip_special_tokens=True
-            )
-
-            print(f"[QwenRealign] Response received ({len(response_text)} chars).")
-
-            new_pairs = self._parse_realign_response(response_text, cluster_han, cluster_viet)
+                print(f"[QwenRealign] Response received ({len(response_text)} chars).")
+                new_pairs = self._parse_realign_response(response_text, cluster_han, cluster_viet)
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e):
+                    print(
+                        f"[QwenRealign] Warning: CUDA Out of Memory while realigning cluster "
+                        f"[{cluster_start}:{cluster_end}]. Skipping this cluster."
+                    )
+                    torch.cuda.empty_cache()
+                    new_pairs = None
+                else:
+                    raise e
 
             if new_pairs is None:
                 print(

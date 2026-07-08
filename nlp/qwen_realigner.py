@@ -293,6 +293,12 @@ Kết quả dóng hàng (JSON array):
         print(f"[QwenRealign] Found {len(clusters)} NaN cluster(s) to re-align.")
         self._load_model()
 
+        # Clear VRAM before starting realignments
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
+
         total_fixed = 0
         # Process clusters in reverse order so index replacement doesn't shift positions
         for cluster_start, cluster_end, cluster_han, cluster_viet in reversed(clusters):

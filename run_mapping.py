@@ -178,7 +178,15 @@ def process_alignment_group(
     # 3.7 Phase 3: Qwen Local Re-Alignment of unresolved NaN clusters
     if realign_enabled and isinstance(aligner, EnsembleSentenceAligner):
         from nlp.qwen_realigner import QwenRealigner
-        realigner = QwenRealigner(config=ENSEMBLE_CONFIG.get("qwen_verifier", {}))
+        # Reuse model and tokenizer if already loaded in Phase 2
+        qwen_model = verifier._model if 'verifier' in locals() else None
+        qwen_tokenizer = verifier._tokenizer if 'verifier' in locals() else None
+        
+        realigner = QwenRealigner(
+            config=ENSEMBLE_CONFIG.get("qwen_verifier", {}),
+            model=qwen_model,
+            tokenizer=qwen_tokenizer
+        )
         raw_aligned = realigner.realign(raw_aligned)
 
     # 4. Map the aligned pairs back to their respective volumes

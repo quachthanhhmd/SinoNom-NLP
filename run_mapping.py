@@ -70,9 +70,10 @@ def clean_vietnamese_sentence(sentence: str) -> bool:
 def process_alignment_group(
     sino_files: List[Tuple[str, str]], # list of (volume_code_str, filepath) e.g., [("02", "q2_sentences.csv")]
     viet_file: str,
-    aligner: EmbeddingSentenceAligner,
+    aligner: EnsembleSentenceAligner,
     exporter: CorpusExporter,
-    work_code: str
+    work_code: str,
+    qwen_enabled: bool = False
 ):
     print(f"\n=======================================================")
     print(f"Aligning Sino files: {[f[1] for f in sino_files]}")
@@ -145,7 +146,7 @@ def process_alignment_group(
     # 3.5 Phase 2: Qwen LLM Verification
     from config import ENSEMBLE_CONFIG
     qwen_conf = ENSEMBLE_CONFIG.get("qwen_verifier", {})
-    if isinstance(aligner, EnsembleSentenceAligner) and qwen_conf.get("enabled", True):
+    if isinstance(aligner, EnsembleSentenceAligner) and qwen_enabled and qwen_conf.get("enabled", True):
         from nlp.qwen_verifier import QwenVerifier
         verifier = QwenVerifier(qwen_conf)
         raw_aligned = verifier.verify(raw_aligned)
@@ -255,6 +256,7 @@ def main():
     parser.add_argument("--device", type=str, default=None, help="Device to run embedding on (cpu/cuda)")
     parser.add_argument("--dev", action="store_true", help="Run in dev mode (only align the first group/Volume 1 for testing)")
     parser.add_argument("--aligner", type=str, default="ensemble", choices=["embedding", "ensemble"], help="Aligner implementation to use")
+    parser.add_argument("--qwen", action="store_true", default=False, help="Run Qwen LLM verification filter (Phase 2)")
     
     args = parser.parse_args()
     
@@ -383,7 +385,8 @@ def main():
                     viet_file=viet_file,
                     aligner=aligner,
                     exporter=exporter,
-                    work_code=args.work_code
+                    work_code=args.work_code,
+                    qwen_enabled=args.qwen
                 )
                 
                 # Clean up temporary split files
@@ -399,7 +402,8 @@ def main():
                 viet_file=viet_file,
                 aligner=aligner,
                 exporter=exporter,
-                work_code=args.work_code
+                work_code=args.work_code,
+                qwen_enabled=args.qwen
             )
 
     print("\nMapping phase completed successfully!")

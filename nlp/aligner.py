@@ -138,6 +138,7 @@ class EmbeddingSentenceAligner(Aligner):
     Sentence-level Aligner using:
     1. Multilingual Sentence Embeddings (LaBSE) to compute Cosine Similarity between Han and Viet directly.
     2. Generalized Dynamic Programming supporting W-1 and 1-L mapping for flexible sentence merging.
+    3. Performance-optimized Precomputation (vector aggregation & normalization pre-calculated outside DP loop).
     """
     def __init__(self, model_name: str = "sentence-transformers/LaBSE", device: str = None):
         self.model_name = model_name
@@ -167,16 +168,9 @@ class EmbeddingSentenceAligner(Aligner):
         han_embeds = self.embed_model.encode(han_sentences, convert_to_numpy=True, show_progress_bar=False)
         viet_embeds = self.embed_model.encode(viet_sentences, convert_to_numpy=True, show_progress_bar=False)
         
-        # Normalize embeddings
+        # Normalize baseline embeddings
         han_embeds_norm = han_embeds / np.linalg.norm(han_embeds, axis=1, keepdims=True)
         viet_embeds_norm = viet_embeds / np.linalg.norm(viet_embeds, axis=1, keepdims=True)
-        
-        # DP matrix
-        dp = np.full((M + 1, N + 1), -1e9)
-        # ptr will store a tuple: (move_type, k, l)
-        # move_type: 1 for k-1 mapping, 2 for 1-l mapping, 4 for Skip Han, 5 for Skip Viet
-        ptr = np.zeros((M + 1, N + 1), dtype=object)
-        dp[0][0] = 0.0
         
         # DP Hyperparameters
         threshold = 0.38 # lowered threshold to capture long-short alignments securely after preface filtering
@@ -185,23 +179,50 @@ class EmbeddingSentenceAligner(Aligner):
         # Max merge configurations
         max_merge_han = 15 # supports merging up to 15 Han sentences for 1 long Viet sentence
         max_merge_viet = 2 # supports merging up to 2 Viet sentences for 1 Han sentence
+
+        print(f"[Aligner] Precomputing aggregated embeddings (max_merge_han={max_merge_han}, max_merge_viet={max_merge_viet})...")
         
-        # Helper functions to compute similarities of aggregated vectors
+        # 1. Precompute and normalize all merged Han embeddings
+        # han_merged_norms[k][i] will store the normalized embedding for merging k sentences ending at index i.
+        # i ranges from 0 to M-1. k ranges from 1 to max_merge_han.
+        # If the range [i-k+1, i] is out of bounds (i-k+1 < 0), we store a zero vector.
+        han_merged_norms = {}
+        for k in range(1, max_merge_han + 1):
+            merged_k = np.zeros((M, 768))
+            for i in range(M):
+                start = i - k + 1
+                if start >= 0:
+                    agg = np.sum(han_embeds[start:i+1], axis=0)
+                    norm = np.linalg.norm(agg)
+                    if norm > 0:
+                        merged_k[i] = agg / norm
+            han_merged_norms[k] = merged_k
+
+        # 2. Precompute and normalize all merged Viet embeddings
+        # viet_merged_norms[l][j] will store the normalized embedding for merging l sentences ending at index j.
+        # j ranges from 0 to N-1. l ranges from 1 to max_merge_viet.
+        viet_merged_norms = {}
+        for l in range(1, max_merge_viet + 1):
+            merged_l = np.zeros((N, 768))
+            for j in range(N):
+                start = j - l + 1
+                if start >= 0:
+                    agg = np.sum(viet_embeds[start:j+1], axis=0)
+                    norm = np.linalg.norm(agg)
+                    if norm > 0:
+                        merged_l[j] = agg / norm
+            viet_merged_norms[l] = merged_l
+        
+        # Helper functions to compute similarities using precomputed normalized vectors
         def get_sim_k_1(i_start, i_end, j):
-            h_agg = np.sum(han_embeds[i_start:i_end+1], axis=0)
-            norm = np.linalg.norm(h_agg)
-            if norm == 0:
-                return 0.0
-            h_agg_norm = h_agg / norm
-            return np.dot(h_agg_norm, viet_embeds_norm[j])
+            # i_start to i_end corresponds to merging k sentences ending at i_end.
+            k = i_end - i_start + 1
+            return np.dot(han_merged_norms[k][i_end], viet_embeds_norm[j])
             
         def get_sim_1_l(i, j_start, j_end):
-            v_agg = np.sum(viet_embeds[j_start:j_end+1], axis=0)
-            norm = np.linalg.norm(v_agg)
-            if norm == 0:
-                return 0.0
-            v_agg_norm = v_agg / norm
-            return np.dot(han_embeds_norm[i], v_agg_norm)
+            # j_start to j_end corresponds to merging l sentences ending at j_end.
+            l = j_end - j_start + 1
+            return np.dot(han_embeds_norm[i], viet_merged_norms[l][j_end])
 
         # Match score helper functions
         def get_score_k_1(i_start, i_end, j):
@@ -211,6 +232,15 @@ class EmbeddingSentenceAligner(Aligner):
         def get_score_1_l(i, j_start, j_end):
             sim = get_sim_1_l(i, j_start, j_end)
             return sim - threshold if sim >= threshold else -10.0
+
+        # DP matrix
+        dp = np.full((M + 1, N + 1), -1e9)
+        # ptr will store a tuple: (move_type, k, l)
+        # move_type: 1 for k-1 mapping, 2 for 1-l mapping, 4 for Skip Han, 5 for Skip Viet
+        ptr = np.zeros((M + 1, N + 1), dtype=object)
+        dp[0][0] = 0.0
+
+        print("[Aligner] Running Dynamic Programming alignment...")
 
         # Fill DP table
         for i in range(M + 1):
@@ -257,7 +287,6 @@ class EmbeddingSentenceAligner(Aligner):
         while i > 0 or j > 0:
             move = ptr[i][j]
             if not move:
-                # Fallback to prevent infinite loops at the boundary
                 if i > 0:
                     aligned_pairs.append(([i-1], [], 0.0))
                     i -= 1

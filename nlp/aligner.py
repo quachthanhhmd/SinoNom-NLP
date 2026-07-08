@@ -588,6 +588,13 @@ class EnsembleSentenceAligner(Aligner):
         print("[Aligner] === Phase 1 complete. Running DP alignment... ===")
         t_dp = __import__('time').time()
 
+        # Precompute k-1 scores in a single 3D array (shape: max_merge_han, M, N)
+        # to allow fast vectorized inner loop over k.
+        scores_k_1_3d = np.zeros((max_merge_han, M, N), dtype=np.float32)
+        for k in range(1, max_merge_han + 1):
+            matrix = fused_sim_k_1[k]
+            scores_k_1_3d[k - 1] = np.where(matrix >= threshold, matrix - threshold, -10.0)
+
         # DP Helper functions to query precomputed fused similarity matrices
         def get_sim_k_1(i_start, i_end, j):
             k = i_end - i_start + 1
@@ -596,14 +603,6 @@ class EnsembleSentenceAligner(Aligner):
         def get_sim_1_l(i, j_start, j_end):
             l = j_end - j_start + 1
             return fused_sim_1_l[l][i, j_end]
-
-        def get_score_k_1(i_start, i_end, j):
-            sim = get_sim_k_1(i_start, i_end, j)
-            return sim - threshold if sim >= threshold else -10.0
-            
-        def get_score_1_l(i, j_start, j_end):
-            sim = get_sim_1_l(i, j_start, j_end)
-            return sim - threshold if sim >= threshold else -10.0
 
         # Initialize DP matrix
         dp = np.full((M + 1, N + 1), -1e9)
@@ -631,18 +630,28 @@ class EnsembleSentenceAligner(Aligner):
                         ptr[i][j] = (5, 0, 1)
                         
                 # Option 1: k-1 mapping (merge k Han sentences to 1 Viet sentence)
-                for k in range(1, max_merge_han + 1):
-                    if i >= k and j >= 1:
-                        score = get_score_k_1(i - k, i - 1, j - 1)
-                        val = dp[i - k][j - 1] + score
-                        if val > dp[i][j]:
-                            dp[i][j] = val
-                            ptr[i][j] = (1, k, 1)
+                if j > 0:
+                    limit_k = min(i, max_merge_han)
+                    if limit_k >= 1:
+                        # Vectorized slice of dp values: [dp[i-1], dp[i-2], ..., dp[i-limit_k]]
+                        dp_prevs = dp[i - limit_k : i, j - 1][::-1]
+                        # Slice of precomputed 3D score matrix
+                        scores = scores_k_1_3d[:limit_k, i - 1, j - 1]
+                        
+                        vals = dp_prevs + scores
+                        best_k_idx = np.argmax(vals)
+                        best_val = vals[best_k_idx]
+                        
+                        if best_val > dp[i][j]:
+                            dp[i][j] = best_val
+                            ptr[i][j] = (1, int(best_k_idx + 1), 1)
                             
                 # Option 2: 1-l mapping (merge l Viet sentences to 1 Han sentence)
-                for l in range(2, max_merge_viet + 1):
-                    if i >= 1 and j >= l:
-                        score = get_score_1_l(i - 1, j - l, j - 1)
+                limit_l = min(j, max_merge_viet)
+                if limit_l >= 2 and i >= 1:
+                    for l in range(2, limit_l + 1):
+                        score = fused_sim_1_l[l][i - 1, j - 1]
+                        score = score - threshold if score >= threshold else -10.0
                         val = dp[i - 1][j - l] + score
                         if val > dp[i][j]:
                             dp[i][j] = val

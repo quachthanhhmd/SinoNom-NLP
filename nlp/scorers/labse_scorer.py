@@ -60,7 +60,7 @@ class LaBSEScorer(BaseScorer):
             sentences,
             convert_to_numpy=True,
             show_progress_bar=False,
-            batch_size=64,
+            batch_size=256,
         )
         norms = np.linalg.norm(embeds, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1.0, norms)

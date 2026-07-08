@@ -25,7 +25,7 @@ ENSEMBLE_CONFIG = {
     "scorers": {
         "labse": {
             "enabled": True,
-            "weight": 0.20,
+            "weight": 0.40,
             "model_name": "sentence-transformers/LaBSE",
         },
         "vecalign": {
@@ -35,18 +35,18 @@ ENSEMBLE_CONFIG = {
         },
         "bertalign": {
             "enabled": True,
-            "weight": 0.25,
+            "weight": 0.15,
             "model_name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         },
         "simalign": {
             "enabled": True,
-            "weight": 0.25,
+            "weight": 0.15,
             "model": "xlmr",
             "top_k": 5,
         },
     },
     "dp": {
-        "threshold": 0.38,
+        "threshold": 0.32,
         "skip_penalty": 0.05,
         "max_merge_han": 15,
         "max_merge_viet": 2,
@@ -56,10 +56,11 @@ ENSEMBLE_CONFIG = {
         "model_name": "Qwen/Qwen2.5-7B-Instruct",
         "load_in_4bit": True,
         "device_map": "auto",
-        "uncertain_low": 0.38,
+        "uncertain_low": 0.32,
         "uncertain_high": 0.50,
         "keep_threshold": 3,
         "batch_size": 8,
     },
 }
+
 

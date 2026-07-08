@@ -137,8 +137,7 @@ class EmbeddingSentenceAligner(Aligner):
     """
     Sentence-level Aligner using:
     1. Multilingual Sentence Embeddings (LaBSE) to compute Cosine Similarity between Han and Viet directly.
-    2. Mutual Nearest Neighbor (MNN) constraints with AND operator (K=3) to support high-precision alignment.
-    3. Dynamic Programming for optimal path search.
+    2. Dynamic Programming for optimal path search with a global similarity threshold.
     """
     def __init__(self, model_name: str = "sentence-transformers/LaBSE", device: str = None):
         self.model_name = model_name
@@ -178,27 +177,9 @@ class EmbeddingSentenceAligner(Aligner):
         dp[0][0] = 0.0
         
         # DP Hyperparameters
-        threshold = 0.42 # optimal threshold for direct LaBSE on split sentences
+        threshold = 0.43 # optimal absolute similarity threshold for direct LaBSE on split sentences
         skip_penalty = 0.05 # small penalty to avoid excessive skipping
         
-        # Calculate Mutual Nearest Neighbors (MNN) constraints
-        # For each Han sentence, find its top K closest Viet targets
-        K_han = min(3, N)
-        top_viets_for_han = []
-        for i in range(M):
-            similarities = [np.dot(han_embeds_norm[i], viet_embeds_norm[j]) for j in range(N)]
-            top_viets_for_han.append(set(np.argsort(similarities)[-K_han:]))
-            
-        # For each Viet sentence, find its top K closest Han sources
-        K_viet = min(3, M)
-        top_hans_for_viet = []
-        for j in range(N):
-            similarities = [np.dot(han_embeds_norm[i], viet_embeds_norm[j]) for i in range(M)]
-            top_hans_for_viet.append(set(np.argsort(similarities)[-K_viet:]))
-            
-        def is_mnn(i, j):
-            return j in top_viets_for_han[i] and i in top_hans_for_viet[j]
-            
         # Helper to compute normalized cosine similarity of aggregated vectors
         def get_sim_1_1(i, j):
             return np.dot(han_embeds_norm[i], viet_embeds_norm[j])
@@ -221,22 +202,16 @@ class EmbeddingSentenceAligner(Aligner):
 
         # Match score helpers
         def get_score_1_1(i, j):
-            if not is_mnn(i, j):
-                return -10.0
             sim = get_sim_1_1(i, j)
-            return sim - threshold if sim >= threshold else -10.0
+            return sim - threshold if sim >= threshold else -1.0
             
         def get_score_1_2(i, j_start, j_end):
-            if not (is_mnn(i, j_start) or is_mnn(i, j_end)):
-                return -10.0
             sim = get_sim_1_2(i, j_start, j_end)
-            return sim - threshold if sim >= threshold else -10.0
+            return sim - threshold if sim >= threshold else -1.0
             
         def get_score_2_1(i_start, i_end, j):
-            if not (is_mnn(i_start, j) or is_mnn(i_end, j)):
-                return -10.0
             sim = get_sim_2_1(i_start, i_end, j)
-            return sim - threshold if sim >= threshold else -10.0
+            return sim - threshold if sim >= threshold else -1.0
 
         # Fill DP table
         for i in range(M + 1):

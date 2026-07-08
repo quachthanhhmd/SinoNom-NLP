@@ -73,7 +73,8 @@ def process_alignment_group(
     aligner: EnsembleSentenceAligner,
     exporter: CorpusExporter,
     work_code: str,
-    qwen_enabled: bool = False
+    qwen_enabled: bool = False,
+    realign_enabled: bool = False
 ):
     print(f"\n=======================================================")
     print(f"Aligning Sino files: {[f[1] for f in sino_files]}")
@@ -174,7 +175,12 @@ def process_alignment_group(
                 filtered_aligned.append(item)
         raw_aligned = filtered_aligned
 
-    
+    # 3.7 Phase 3: Qwen Local Re-Alignment of unresolved NaN clusters
+    if realign_enabled and isinstance(aligner, EnsembleSentenceAligner):
+        from nlp.qwen_realigner import QwenRealigner
+        realigner = QwenRealigner(config=ENSEMBLE_CONFIG.get("qwen_verifier", {}))
+        raw_aligned = realigner.realign(raw_aligned)
+
     # 4. Map the aligned pairs back to their respective volumes
     # Backtrack aligned sentences using the original indices to figure out the volume
     # raw_aligned is a list of {'pair_id': ..., 'han_sentence': ..., 'viet_sentence': ...}
@@ -257,6 +263,7 @@ def main():
     parser.add_argument("--dev", action="store_true", help="Run in dev mode (only align the first group/Volume 1 for testing)")
     parser.add_argument("--aligner", type=str, default="ensemble", choices=["embedding", "ensemble"], help="Aligner implementation to use")
     parser.add_argument("--qwen", action="store_true", default=False, help="Run Qwen LLM verification filter (Phase 2)")
+    parser.add_argument("--realign", action="store_true", default=False, help="Run Qwen Phase 3 local re-alignment of NaN clusters")
     
     args = parser.parse_args()
     
@@ -386,7 +393,8 @@ def main():
                     aligner=aligner,
                     exporter=exporter,
                     work_code=args.work_code,
-                    qwen_enabled=args.qwen
+                    qwen_enabled=args.qwen,
+                    realign_enabled=args.realign
                 )
                 
                 # Clean up temporary split files
@@ -403,7 +411,8 @@ def main():
                 aligner=aligner,
                 exporter=exporter,
                 work_code=args.work_code,
-                qwen_enabled=args.qwen
+                qwen_enabled=args.qwen,
+                realign_enabled=args.realign
             )
 
     print("\nMapping phase completed successfully!")

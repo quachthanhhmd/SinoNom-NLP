@@ -1,0 +1,345 @@
+"""
+Qwen Re-Aligner — Phase 3: Local Re-Alignment of Unresolved NaN Clusters.
+
+After Phase 2 (QwenVerifier), some Han and Viet sentences remain unmatched (similarity_score=0,
+han_sentence=NaN or viet_sentence=NaN). These typically come from 2 situations:
+  1. A long cluster of Han sentences was rejected by Qwen because the embedding
+     couldn't correctly fuse them with the right Viet sentences.
+  2. A section where the translation style differs significantly between the two texts.
+
+This module:
+  1. Scans the aligned pairs list for consecutive NaN clusters.
+  2. Groups adjacent unmatched Han sentences + unmatched Viet sentences into "unresolved blocks".
+  3. For each block, sends the Han and Viet sentences to Qwen with a JSON alignment prompt.
+  4. Parses Qwen's output and replaces the NaN entries with corrected alignments.
+  5. Falls back gracefully (keeps NaN as-is) if Qwen returns unparseable output.
+
+Runs offline on Kaggle T4 with 4-bit quantization. Reuses the already-loaded model if
+QwenVerifier is provided.
+"""
+
+import json
+import re
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from config import ENSEMBLE_CONFIG
+
+
+class QwenRealigner:
+    """
+    Phase 3: LLM-driven local re-alignment of unresolved NaN clusters.
+
+    Detects clusters of consecutive unmatched Han/Viet sentences and
+    asks Qwen2.5-7B to align them locally, outputting a JSON structure.
+    """
+
+    def __init__(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        model=None,
+        tokenizer=None,
+    ):
+        """
+        Args:
+            config:     qwen_verifier config dict. Falls back to ENSEMBLE_CONFIG.
+            model:      Optional pre-loaded Qwen model (to avoid re-loading from QwenVerifier).
+            tokenizer:  Optional pre-loaded Qwen tokenizer.
+        """
+        self.config = config or ENSEMBLE_CONFIG.get("qwen_verifier", {})
+        self.model_name = self.config.get("model_name", "Qwen/Qwen2.5-7B-Instruct")
+        self.load_in_4bit = self.config.get("load_in_4bit", True)
+        self.device_map = self.config.get("device_map", "auto")
+        self.batch_size = self.config.get("batch_size", 4)
+
+        # Allow reusing model loaded from QwenVerifier
+        self._model = model
+        self._tokenizer = tokenizer
+
+    # ------------------------------------------------------------------ #
+    # Model loading
+    # ------------------------------------------------------------------ #
+
+    def _load_model(self):
+        if self._model is not None:
+            return
+
+        print(f"[QwenRealign] Loading {self.model_name} (4-bit={self.load_in_4bit})...")
+        t0 = time.time()
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        model_kwargs = {"device_map": self.device_map, "torch_dtype": torch.float16}
+
+        if self.load_in_4bit:
+            try:
+                import accelerate
+                import bitsandbytes
+                model_kwargs["load_in_4bit"] = True
+            except ImportError:
+                print("[QwenRealign] Warning: bitsandbytes not installed. Loading without 4-bit.")
+
+        self._model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
+        print(f"[QwenRealign] Model loaded. ({time.time() - t0:.1f}s)")
+
+    # ------------------------------------------------------------------ #
+    # Cluster detection
+    # ------------------------------------------------------------------ #
+
+    def _detect_nan_clusters(
+        self, aligned_pairs: List[Dict[str, Any]]
+    ) -> List[Tuple[int, int, List[str], List[str]]]:
+        """
+        Scan aligned_pairs for consecutive blocks of unmatched sentences.
+
+        A "NaN cluster" is a contiguous range [start_idx, end_idx) where each
+        entry has either han_sentence=NaN/empty OR viet_sentence=NaN/empty
+        (but not both simultaneously from different sides).
+
+        Returns:
+            List of tuples: (start_idx, end_idx, han_sentences_list, viet_sentences_list)
+            where han_sentences_list and viet_sentences_list are non-empty lists of
+            the unmatched sentences in that cluster.
+        """
+        clusters = []
+        n = len(aligned_pairs)
+        i = 0
+
+        while i < n:
+            pair = aligned_pairs[i]
+            han = str(pair.get("han_sentence", "") or "").strip()
+            viet = str(pair.get("viet_sentence", "") or "").strip()
+            is_nan = (not han or han.lower() == "nan") or (not viet or viet.lower() == "nan")
+
+            if not is_nan:
+                i += 1
+                continue
+
+            # Found start of NaN cluster — scan forward to find the full extent
+            cluster_start = i
+            cluster_han = []
+            cluster_viet = []
+
+            while i < n:
+                p = aligned_pairs[i]
+                h = str(p.get("han_sentence", "") or "").strip()
+                v = str(p.get("viet_sentence", "") or "").strip()
+                h_is_nan = not h or h.lower() == "nan"
+                v_is_nan = not v or v.lower() == "nan"
+
+                if not h_is_nan and not v_is_nan:
+                    # Found a valid pair — end of cluster
+                    break
+
+                if not h_is_nan:
+                    cluster_han.append(h)
+                if not v_is_nan:
+                    cluster_viet.append(v)
+
+                i += 1
+
+            cluster_end = i
+
+            # Only attempt re-alignment if we have BOTH sides to work with
+            if cluster_han and cluster_viet:
+                clusters.append((cluster_start, cluster_end, cluster_han, cluster_viet))
+            # else: one-sided orphan blocks — leave as NaN (nothing to align against)
+
+        return clusters
+
+    # ------------------------------------------------------------------ #
+    # Prompt builder
+    # ------------------------------------------------------------------ #
+
+    def _build_realign_prompt(self, han_sentences: List[str], viet_sentences: List[str]) -> str:
+        han_numbered = "\n".join(f"  H{i+1}: {s}" for i, s in enumerate(han_sentences))
+        viet_numbered = "\n".join(f"  V{j+1}: {s}" for j, s in enumerate(viet_sentences))
+
+        system_content = (
+            "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam với kinh nghiệm sâu rộng "
+            "về Đại Nam Nhất Thống Chí."
+        )
+        user_content = f"""Dưới đây là các câu chữ Hán cổ và các câu dịch tiếng Việt tương ứng bị lệch pha (không được dóng hàng đúng chỗ).
+
+Nhiệm vụ của bạn: Dóng hàng lại các câu Hán và Việt dưới đây một cách CHÍNH XÁC NHẤT.
+
+QUY TẮC:
+- Mỗi cặp JSON phải có "han" (một hoặc nhiều câu Hán gộp lại) và "viet" (một hoặc nhiều câu Việt gộp lại).
+- Dùng số thứ tự để tham chiếu câu (H1, H2... cho Hán; V1, V2... cho Việt).
+- Mỗi câu CHỈ được dùng một lần.
+- Nếu một câu Hán không tìm được câu Việt phù hợp, đặt "viet": null.
+- Nếu một câu Việt không tìm được câu Hán phù hợp, đặt "han": null.
+- Trả lời ĐÚNG định dạng JSON, không giải thích thêm.
+
+CÁC CÂU HÁN:
+{han_numbered}
+
+CÁC CÂU VIỆT:
+{viet_numbered}
+
+Kết quả dóng hàng (JSON array):
+[
+  {{"han": "...", "viet": "..."}},
+  ...
+]
+"""
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ]
+        return self._tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+    # ------------------------------------------------------------------ #
+    # JSON parser
+    # ------------------------------------------------------------------ #
+
+    def _parse_realign_response(
+        self,
+        response_text: str,
+        han_sentences: List[str],
+        viet_sentences: List[str],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Parse Qwen's JSON output and resolve H/V references to actual sentence text.
+
+        Returns None if parsing fails.
+        """
+        # Extract JSON array from response
+        match = re.search(r"\[.*?\]", response_text, re.DOTALL)
+        if not match:
+            return None
+
+        try:
+            raw_pairs = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(raw_pairs, list):
+            return None
+
+        results = []
+        for item in raw_pairs:
+            if not isinstance(item, dict):
+                continue
+
+            # Resolve "H1", "H2"... references to actual text
+            han_val = item.get("han")
+            viet_val = item.get("viet")
+
+            han_text = self._resolve_text(han_val, han_sentences, "H")
+            viet_text = self._resolve_text(viet_val, viet_sentences, "V")
+
+            if han_text or viet_text:
+                results.append({
+                    "han_sentence": han_text or "",
+                    "viet_sentence": viet_text or "",
+                    "similarity_score": 0.75 if (han_text and viet_text) else 0.0,
+                    "qwen_realigned": True,
+                })
+
+        return results if results else None
+
+    def _resolve_text(
+        self, val: Any, sentences: List[str], prefix: str
+    ) -> Optional[str]:
+        """
+        Resolve val to actual sentence text.
+        val can be:
+          - None/null → return None
+          - A string containing references like "H1" or "H1 H2" → look up by index
+          - A plain sentence string → return as-is
+        """
+        if val is None:
+            return None
+        val = str(val).strip()
+        if not val or val.lower() == "null":
+            return None
+
+        # Check if it looks like reference format: "H1", "H1 H2", "V1 V2 V3"
+        refs = re.findall(rf"{prefix}(\d+)", val, re.IGNORECASE)
+        if refs:
+            parts = []
+            for ref in refs:
+                idx = int(ref) - 1  # 1-indexed to 0-indexed
+                if 0 <= idx < len(sentences):
+                    parts.append(sentences[idx])
+            return " ".join(parts) if parts else None
+
+        # Otherwise treat as plain text returned directly by Qwen
+        return val
+
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+
+    def realign(self, aligned_pairs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Phase 3: Detect NaN clusters and re-align them using Qwen.
+
+        Args:
+            aligned_pairs: List of dicts from Phase 2 output.
+
+        Returns:
+            Updated list with NaN clusters replaced by Qwen's re-alignments.
+        """
+        clusters = self._detect_nan_clusters(aligned_pairs)
+        if not clusters:
+            print("[QwenRealign] No NaN clusters found. Phase 3 skipped.")
+            return aligned_pairs
+
+        print(f"[QwenRealign] Found {len(clusters)} NaN cluster(s) to re-align.")
+        self._load_model()
+
+        total_fixed = 0
+        # Process clusters in reverse order so index replacement doesn't shift positions
+        for cluster_start, cluster_end, cluster_han, cluster_viet in reversed(clusters):
+            print(
+                f"[QwenRealign] Processing cluster [{cluster_start}:{cluster_end}] "
+                f"({len(cluster_han)} Han, {len(cluster_viet)} Viet)..."
+            )
+
+            prompt = self._build_realign_prompt(cluster_han, cluster_viet)
+
+            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+            import torch
+            with torch.no_grad():
+                output_tokens = self._model.generate(
+                    **inputs,
+                    # Allow enough tokens for a JSON response. 50 tokens per pair typically.
+                    max_new_tokens=min(50 * (len(cluster_han) + len(cluster_viet)), 1024),
+                    do_sample=False,
+                    pad_token_id=self._tokenizer.eos_token_id,
+                )
+
+            input_len = inputs.input_ids.shape[1]
+            response_text = self._tokenizer.decode(
+                output_tokens[0][input_len:], skip_special_tokens=True
+            )
+
+            print(f"[QwenRealign] Response received ({len(response_text)} chars).")
+
+            new_pairs = self._parse_realign_response(response_text, cluster_han, cluster_viet)
+
+            if new_pairs is None:
+                print(
+                    f"[QwenRealign] Warning: Could not parse Qwen output for cluster "
+                    f"[{cluster_start}:{cluster_end}]. Keeping NaN entries as-is."
+                )
+                continue
+
+            # Replace the cluster slice with Qwen's re-aligned pairs
+            aligned_pairs[cluster_start:cluster_end] = new_pairs
+            total_fixed += 1
+            print(
+                f"[QwenRealign] Cluster [{cluster_start}:{cluster_end}] replaced with "
+                f"{len(new_pairs)} re-aligned pair(s)."
+            )
+
+        print(
+            f"[QwenRealign] Phase 3 complete. "
+            f"Fixed {total_fixed}/{len(clusters)} cluster(s)."
+        )
+        return aligned_pairs

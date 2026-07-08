@@ -93,9 +93,18 @@ def process_alignment_group(
             print(f"[Error] Column 'sentence' missing in {sino_path}")
             continue
             
+        # Special filter for Volume 1: skip preface/tấu biểu before '大南一統志卷之一'
+        is_quyen1 = (str(vol_code) == "01" or str(vol_code) == "1")
+        skip_preface = is_quyen1
+        
         for _, row in df_sino.iterrows():
             sent = str(row['sentence']).strip()
             if sent:
+                if skip_preface:
+                    if "大南一統志卷之一" in sent:
+                        skip_preface = False
+                    else:
+                        continue
                 # Split Han sentences by whitespace to break down merged lines
                 parts = [p.strip() for p in re.split(r'\s+', sent) if p.strip()]
                 for p in parts:

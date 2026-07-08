@@ -12,3 +12,8 @@ Pillow
 numpy
 opencv-python
 sentence-transformers
+bertalign
+simalign
+bitsandbytes>=0.41.0
+accelerate>=0.26.0
+

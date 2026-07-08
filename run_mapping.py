@@ -3,8 +3,9 @@ import re
 import pandas as pd
 import argparse
 from typing import List, Dict, Tuple
-from nlp.aligner import EmbeddingSentenceAligner
+from nlp.aligner import EmbeddingSentenceAligner, EnsembleSentenceAligner
 from utils.exporters import CorpusExporter
+
 
 def detect_separator(file_path: str) -> str:
     """Detects if a CSV file uses ',' or ';' as a separator."""
@@ -141,6 +142,38 @@ def process_alignment_group(
     # 3. Perform Alignment
     raw_aligned = aligner.align(all_sino_sentences, viet_sentences)
     
+    # 3.5 Phase 2: Qwen LLM Verification
+    from config import ENSEMBLE_CONFIG
+    qwen_conf = ENSEMBLE_CONFIG.get("qwen_verifier", {})
+    if isinstance(aligner, EnsembleSentenceAligner) and qwen_conf.get("enabled", True):
+        from nlp.qwen_verifier import QwenVerifier
+        verifier = QwenVerifier(qwen_conf)
+        raw_aligned = verifier.verify(raw_aligned)
+        
+        # Split rejected pairs (verified == False) into unaligned sentences to avoid false matches
+        filtered_aligned = []
+        for item in raw_aligned:
+            if not item.get("verified", True):
+                print(f"[Qwen] Splitting incorrect match (score={item.get('qwen_score')}):")
+                print(f"  Han:  {item['han_sentence']}")
+                print(f"  Viet: {item['viet_sentence']}")
+                if item["han_sentence"]:
+                    filtered_aligned.append({
+                        "han_sentence": item["han_sentence"],
+                        "viet_sentence": "",
+                        "similarity_score": 0.0
+                    })
+                if item["viet_sentence"]:
+                    filtered_aligned.append({
+                        "han_sentence": "",
+                        "viet_sentence": item["viet_sentence"],
+                        "similarity_score": 0.0
+                    })
+            else:
+                filtered_aligned.append(item)
+        raw_aligned = filtered_aligned
+
+    
     # 4. Map the aligned pairs back to their respective volumes
     # Backtrack aligned sentences using the original indices to figure out the volume
     # raw_aligned is a list of {'pair_id': ..., 'han_sentence': ..., 'viet_sentence': ...}
@@ -221,12 +254,17 @@ def main():
     parser.add_argument("--model", type=str, default="sentence-transformers/LaBSE", help="Multilingual embedding model to use")
     parser.add_argument("--device", type=str, default=None, help="Device to run embedding on (cpu/cuda)")
     parser.add_argument("--dev", action="store_true", help="Run in dev mode (only align the first group/Volume 1 for testing)")
+    parser.add_argument("--aligner", type=str, default="ensemble", choices=["embedding", "ensemble"], help="Aligner implementation to use")
     
     args = parser.parse_args()
     
     # 1. Initialize Aligner and Exporter
-    aligner = EmbeddingSentenceAligner(model_name=args.model, device=args.device)
+    if args.aligner == "ensemble":
+        aligner = EnsembleSentenceAligner(device=args.device)
+    else:
+        aligner = EmbeddingSentenceAligner(model_name=args.model, device=args.device)
     exporter = CorpusExporter(output_dir=args.output_dir)
+
     
     # 2. Define the Mapping Groups based on the reviewed correspondence table
     # Each group: (List of (volume_code, sino_csv_filename), viet_csv_filename)

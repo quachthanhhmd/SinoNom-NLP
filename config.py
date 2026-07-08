@@ -19,3 +19,47 @@ class Config:
     # Flags
     ENABLE_OCR = True
     ENABLE_CORRECTION = True
+
+
+ENSEMBLE_CONFIG = {
+    "scorers": {
+        "labse": {
+            "enabled": True,
+            "weight": 0.20,
+            "model_name": "sentence-transformers/LaBSE",
+        },
+        "vecalign": {
+            "enabled": True,
+            "weight": 0.30,
+            "window_size": 3,
+        },
+        "bertalign": {
+            "enabled": True,
+            "weight": 0.25,
+            "model_name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        },
+        "simalign": {
+            "enabled": True,
+            "weight": 0.25,
+            "model": "xlmr",
+            "top_k": 5,
+        },
+    },
+    "dp": {
+        "threshold": 0.38,
+        "skip_penalty": 0.05,
+        "max_merge_han": 15,
+        "max_merge_viet": 2,
+    },
+    "qwen_verifier": {
+        "enabled": True,
+        "model_name": "Qwen/Qwen2.5-7B-Instruct",
+        "load_in_4bit": True,
+        "device_map": "auto",
+        "uncertain_low": 0.38,
+        "uncertain_high": 0.50,
+        "keep_threshold": 3,
+        "batch_size": 8,
+    },
+}
+

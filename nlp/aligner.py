@@ -137,7 +137,7 @@ class EmbeddingSentenceAligner(Aligner):
     """
     Sentence-level Aligner using:
     1. Multilingual Sentence Embeddings (LaBSE) to compute Cosine Similarity between Han and Viet directly.
-    2. Dynamic Programming for optimal path search with a global similarity threshold.
+    2. Generalized Dynamic Programming supporting W-1 and 1-L mapping for flexible sentence merging.
     """
     def __init__(self, model_name: str = "sentence-transformers/LaBSE", device: str = None):
         self.model_name = model_name
@@ -173,45 +173,44 @@ class EmbeddingSentenceAligner(Aligner):
         
         # DP matrix
         dp = np.full((M + 1, N + 1), -1e9)
-        ptr = np.zeros((M + 1, N + 1), dtype=int)
+        # ptr will store a tuple: (move_type, k, l)
+        # move_type: 1 for k-1 mapping, 2 for 1-l mapping, 4 for Skip Han, 5 for Skip Viet
+        ptr = np.zeros((M + 1, N + 1), dtype=object)
         dp[0][0] = 0.0
         
         # DP Hyperparameters
         threshold = 0.38 # lowered threshold to capture long-short alignments securely after preface filtering
         skip_penalty = 0.05 # small penalty to avoid excessive skipping
         
-        # Helper to compute normalized cosine similarity of aggregated vectors
-        def get_sim_1_1(i, j):
-            return np.dot(han_embeds_norm[i], viet_embeds_norm[j])
-            
-        def get_sim_1_2(i, j_start, j_end):
-            v_agg = np.sum(viet_embeds[j_start:j_end+1], axis=0)
-            norm = np.linalg.norm(v_agg)
-            if norm == 0:
-                return 0.0
-            v_agg_norm = v_agg / norm
-            return np.dot(han_embeds_norm[i], v_agg_norm)
-            
-        def get_sim_2_1(i_start, i_end, j):
+        # Max merge configurations
+        max_merge_han = 15 # supports merging up to 15 Han sentences for 1 long Viet sentence
+        max_merge_viet = 2 # supports merging up to 2 Viet sentences for 1 Han sentence
+        
+        # Helper functions to compute similarities of aggregated vectors
+        def get_sim_k_1(i_start, i_end, j):
             h_agg = np.sum(han_embeds[i_start:i_end+1], axis=0)
             norm = np.linalg.norm(h_agg)
             if norm == 0:
                 return 0.0
             h_agg_norm = h_agg / norm
             return np.dot(h_agg_norm, viet_embeds_norm[j])
+            
+        def get_sim_1_l(i, j_start, j_end):
+            v_agg = np.sum(viet_embeds[j_start:j_end+1], axis=0)
+            norm = np.linalg.norm(v_agg)
+            if norm == 0:
+                return 0.0
+            v_agg_norm = v_agg / norm
+            return np.dot(han_embeds_norm[i], v_agg_norm)
 
-        # Match score helpers
-        def get_score_1_1(i, j):
-            sim = get_sim_1_1(i, j)
-            return sim - threshold if sim >= threshold else -1.0
+        # Match score helper functions
+        def get_score_k_1(i_start, i_end, j):
+            sim = get_sim_k_1(i_start, i_end, j)
+            return sim - threshold if sim >= threshold else -10.0
             
-        def get_score_1_2(i, j_start, j_end):
-            sim = get_sim_1_2(i, j_start, j_end)
-            return sim - threshold if sim >= threshold else -1.0
-            
-        def get_score_2_1(i_start, i_end, j):
-            sim = get_sim_2_1(i_start, i_end, j)
-            return sim - threshold if sim >= threshold else -1.0
+        def get_score_1_l(i, j_start, j_end):
+            sim = get_sim_1_l(i, j_start, j_end)
+            return sim - threshold if sim >= threshold else -10.0
 
         # Fill DP table
         for i in range(M + 1):
@@ -224,35 +223,32 @@ class EmbeddingSentenceAligner(Aligner):
                     val = dp[i-1][j] - skip_penalty
                     if val > dp[i][j]:
                         dp[i][j] = val
-                        ptr[i][j] = 4
+                        ptr[i][j] = (4, 1, 0)
                         
                 # Option 5: Skip Viet (V[j-1] mapped to empty)
                 if j > 0:
                     val = dp[i][j-1] - skip_penalty
                     if val > dp[i][j]:
                         dp[i][j] = val
-                        ptr[i][j] = 5
+                        ptr[i][j] = (5, 0, 1)
                         
-                # Option 1: 1-1 mapping
-                if i > 0 and j > 0:
-                    val = dp[i-1][j-1] + get_score_1_1(i-1, j-1)
-                    if val > dp[i][j]:
-                        dp[i][j] = val
-                        ptr[i][j] = 1
-                        
-                # Option 2: 1-2 mapping
-                if i > 0 and j > 1:
-                    val = dp[i-1][j-2] + get_score_1_2(i-1, j-2, j-1)
-                    if val > dp[i][j]:
-                        dp[i][j] = val
-                        ptr[i][j] = 2
-                        
-                # Option 3: 2-1 mapping
-                if i > 1 and j > 0:
-                    val = dp[i-2][j-1] + get_score_2_1(i-2, i-1, j-1)
-                    if val > dp[i][j]:
-                        dp[i][j] = val
-                        ptr[i][j] = 3
+                # Option 1: k-1 mapping (merge k Han sentences to 1 Viet sentence)
+                for k in range(1, max_merge_han + 1):
+                    if i >= k and j >= 1:
+                        score = get_score_k_1(i - k, i - 1, j - 1)
+                        val = dp[i - k][j - 1] + score
+                        if val > dp[i][j]:
+                            dp[i][j] = val
+                            ptr[i][j] = (1, k, 1)
+                            
+                # Option 2: 1-l mapping (merge l Viet sentences to 1 Han sentence)
+                for l in range(2, max_merge_viet + 1):
+                    if i >= 1 and j >= l:
+                        score = get_score_1_l(i - 1, j - l, j - 1)
+                        val = dp[i - 1][j - l] + score
+                        if val > dp[i][j]:
+                            dp[i][j] = val
+                            ptr[i][j] = (2, 1, l)
 
         # Backtracking
         i, j = M, N
@@ -260,34 +256,35 @@ class EmbeddingSentenceAligner(Aligner):
         
         while i > 0 or j > 0:
             move = ptr[i][j]
-            if move == 1: # 1-1
-                sim = get_sim_1_1(i-1, j-1)
-                aligned_pairs.append(([i-1], [j-1], sim))
-                i -= 1
+            if not move:
+                # Fallback to prevent infinite loops at the boundary
+                if i > 0:
+                    aligned_pairs.append(([i-1], [], 0.0))
+                    i -= 1
+                else:
+                    aligned_pairs.append(([], [j-1], 0.0))
+                    j -= 1
+                continue
+                
+            move_type, k, l = move
+            if move_type == 1: # k-1 mapping
+                sim = get_sim_k_1(i - k, i - 1, j - 1)
+                aligned_pairs.append((list(range(i - k, i)), [j - 1], sim))
+                i -= k
                 j -= 1
-            elif move == 2: # 1-2
-                sim = get_sim_1_2(i-1, j-2, j-1)
-                aligned_pairs.append(([i-1], [j-2, j-1], sim))
+            elif move_type == 2: # 1-l mapping
+                sim = get_sim_1_l(i - 1, j - l, j - 1)
+                aligned_pairs.append(([i - 1], list(range(j - l, j)), sim))
                 i -= 1
-                j -= 2
-            elif move == 3: # 2-1
-                sim = get_sim_2_1(i-2, i-1, j-1)
-                aligned_pairs.append(([i-2, i-1], [j-1], sim))
-                i -= 2
-                j -= 1
-            elif move == 4: # Skip Han
-                aligned_pairs.append(([i-1], [], 0.0))
+                j -= l
+            elif move_type == 4: # Skip Han
+                aligned_pairs.append(([i - 1], [], 0.0))
                 i -= 1
-            elif move == 5: # Skip Viet
-                aligned_pairs.append(([], [j-1], 0.0))
+            elif move_type == 5: # Skip Viet
+                aligned_pairs.append(([], [j - 1], 0.0))
                 j -= 1
             else:
-                if i > 0 and j > 0:
-                    sim = get_sim_1_1(i-1, j-1)
-                    aligned_pairs.append(([i-1], [j-1], sim))
-                    i -= 1
-                    j -= 1
-                elif i > 0:
+                if i > 0:
                     aligned_pairs.append(([i-1], [], 0.0))
                     i -= 1
                 else:

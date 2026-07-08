@@ -182,35 +182,39 @@ class EmbeddingSentenceAligner(Aligner):
 
         print(f"[Aligner] Precomputing aggregated embeddings (max_merge_han={max_merge_han}, max_merge_viet={max_merge_viet})...")
         
+        # Use dynamic embedding dimension to support any model (not just LaBSE 768-dim)
+        D = han_embeds.shape[1]
+        
+        # Vectorized precomputation using cumulative sums (np.cumsum).
+        # padded_cumsum[i+1] = sum of embeddings[0..i], padded_cumsum[0] = zero vector.
+        # So sum of embeddings from i_start to i_end = padded_cumsum[i_end+1] - padded_cumsum[i_start]
+        padded_han_cumsum = np.vstack([np.zeros((1, D)), np.cumsum(han_embeds, axis=0)])  # shape (M+1, D)
+        padded_viet_cumsum = np.vstack([np.zeros((1, D)), np.cumsum(viet_embeds, axis=0)])  # shape (N+1, D)
+        
         # 1. Precompute and normalize all merged Han embeddings
-        # han_merged_norms[k][i] will store the normalized embedding for merging k sentences ending at index i.
-        # i ranges from 0 to M-1. k ranges from 1 to max_merge_han.
-        # If the range [i-k+1, i] is out of bounds (i-k+1 < 0), we store a zero vector.
+        # han_merged_norms[k][i] stores the normalized merged embedding for k sentences ending at index i.
+        # Valid only when i >= k-1 (i.e., there are at least k sentences before and including i).
         han_merged_norms = {}
         for k in range(1, max_merge_han + 1):
-            merged_k = np.zeros((M, 768))
-            for i in range(M):
-                start = i - k + 1
-                if start >= 0:
-                    agg = np.sum(han_embeds[start:i+1], axis=0)
-                    norm = np.linalg.norm(agg)
-                    if norm > 0:
-                        merged_k[i] = agg / norm
+            merged_k = np.zeros((M, D))
+            if k <= M:
+                # All windows of size k: agg[r] = sum of han_embeds[r-k+1 .. r] for r in [k-1, M-1]
+                agg = padded_han_cumsum[k:M+1] - padded_han_cumsum[0:M-k+1]  # shape (M-k+1, D)
+                norms = np.linalg.norm(agg, axis=1, keepdims=True)
+                norms = np.where(norms == 0, 1.0, norms)  # avoid divide-by-zero
+                merged_k[k-1:M] = agg / norms  # store at valid index positions [k-1, M-1]
             han_merged_norms[k] = merged_k
 
         # 2. Precompute and normalize all merged Viet embeddings
-        # viet_merged_norms[l][j] will store the normalized embedding for merging l sentences ending at index j.
-        # j ranges from 0 to N-1. l ranges from 1 to max_merge_viet.
+        # viet_merged_norms[l][j] stores the normalized merged embedding for l sentences ending at index j.
         viet_merged_norms = {}
         for l in range(1, max_merge_viet + 1):
-            merged_l = np.zeros((N, 768))
-            for j in range(N):
-                start = j - l + 1
-                if start >= 0:
-                    agg = np.sum(viet_embeds[start:j+1], axis=0)
-                    norm = np.linalg.norm(agg)
-                    if norm > 0:
-                        merged_l[j] = agg / norm
+            merged_l = np.zeros((N, D))
+            if l <= N:
+                agg = padded_viet_cumsum[l:N+1] - padded_viet_cumsum[0:N-l+1]  # shape (N-l+1, D)
+                norms = np.linalg.norm(agg, axis=1, keepdims=True)
+                norms = np.where(norms == 0, 1.0, norms)
+                merged_l[l-1:N] = agg / norms
             viet_merged_norms[l] = merged_l
         
         # Helper functions to compute similarities using precomputed normalized vectors

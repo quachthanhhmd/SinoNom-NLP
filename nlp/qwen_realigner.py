@@ -207,17 +207,45 @@ Kết quả dóng hàng (JSON array):
 
         Returns None if parsing fails.
         """
-        # Extract JSON array from response
-        match = re.search(r"\[.*?\]", response_text, re.DOTALL)
-        if not match:
-            return None
+        clean_text = response_text.strip()
+        # Clean markdown code blocks if present
+        if "```json" in clean_text:
+            clean_text = clean_text.split("```json")[-1].split("```")[0].strip()
+        elif "```" in clean_text:
+            clean_text = clean_text.split("```")[-1].split("```")[0].strip()
 
+        # Find first '[' and last ']'
+        start_idx = clean_text.find('[')
+        end_idx = clean_text.rfind(']')
+        if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
+            return None
+        
+        json_str = clean_text[start_idx : end_idx + 1]
+
+        # Basic JSON cleanup for trailing commas
+        json_str = re.sub(r',\s*\}', '}', json_str)
+        json_str = re.sub(r',\s*\]', ']', json_str)
+
+        raw_pairs = None
         try:
-            raw_pairs = json.loads(match.group(0))
+            raw_pairs = json.loads(json_str)
         except json.JSONDecodeError:
-            return None
+            # Fallback regex parser for common variations: {"han": "H1", "viet": "V1"}
+            # Handles double quotes, single quotes, and nulls
+            dict_matches = re.findall(r'\{\s*"han"\s*:\s*([^,}\n]+)\s*,\s*"viet"\s*:\s*([^}\n]+)\s*\}', json_str)
+            if not dict_matches:
+                dict_matches = re.findall(r"\{\s*'han'\s*:\s*([^,}\n]+)\s*,\s*'viet'\s*:\s*([^}\n]+)\s*\}", json_str)
+            
+            if dict_matches:
+                raw_pairs = []
+                for h_ref, v_ref in dict_matches:
+                    h_ref = h_ref.strip().strip('"').strip("'")
+                    v_ref = v_ref.strip().strip('"').strip("'")
+                    if h_ref.lower() == 'null': h_ref = None
+                    if v_ref.lower() == 'null': v_ref = None
+                    raw_pairs.append({"han": h_ref, "viet": v_ref})
 
-        if not isinstance(raw_pairs, list):
+        if not raw_pairs or not isinstance(raw_pairs, list):
             return None
 
         results = []

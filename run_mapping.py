@@ -418,7 +418,7 @@ def main():
                 # e.g., ID format: Q10_2_001 -> volume "10", Q11_3_001 -> volume "11"
                 # e.g., ID format: Q16_... -> volume "16", Q17_... -> volume "17"
                 # We can group sentences by their volume prefix from the ID column.
-                vol_sentences = {} # vol_code -> list of sentences
+                vol_sentences = {} # vol_code -> list of dicts
                 
                 for _, row in df_temp.iterrows():
                     sent_id = str(row['ID'])
@@ -435,13 +435,17 @@ def main():
                         
                     if vol_num not in vol_sentences:
                         vol_sentences[vol_num] = []
-                    vol_sentences[vol_num].append(sentence)
+                    vol_sentences[vol_num].append({
+                        "ID": sent_id,
+                        "sentence": sentence,
+                        "reference_Id": "[]"
+                    })
                 
                 # Now we write temporary split CSV files so we can reuse the process_alignment_group logic!
                 temp_sino_files = []
-                for vol_num, sents in vol_sentences.items():
+                for vol_num, sents_dicts in vol_sentences.items():
                     temp_csv_path = os.path.join(args.sino_dir, f"temp_split_{vol_num}.csv")
-                    pd.DataFrame({"sentence": sents}).to_csv(temp_csv_path, index=False)
+                    pd.DataFrame(sents_dicts).to_csv(temp_csv_path, index=False)
                     temp_sino_files.append((vol_num, temp_csv_path))
                 
                 # Sort temp files so volume "10" comes before "11", and "16" before "17"

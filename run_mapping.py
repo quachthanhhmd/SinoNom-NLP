@@ -163,12 +163,27 @@ def process_alignment_group(
         raise KeyError(f"Column 'sentence' missing in {viet_file}")
         
     viet_sentences = []
+    cleaned_count = 0
+    printed_examples = 0
+    
     for _, row in df_viet.iterrows():
         sent = str(row['sentence']).strip()
         cleaned_sent = clean_vietnamese_text(sent)
+        
+        # Log modifications for the user to verify
+        if cleaned_sent != sent:
+            cleaned_count += 1
+            if printed_examples < 5:
+                print(f"[Cleaner Log] Modified sentence:")
+                print(f"  Original: {repr(sent)}")
+                print(f"  Cleaned:  {repr(cleaned_sent)}")
+                printed_examples += 1
+                
         if clean_vietnamese_sentence(cleaned_sent):
             viet_sentences.append(cleaned_sent)
             
+    print(f"[Cleaner Log] Summary: Cleaned annotations/Han characters in {cleaned_count} sentence(s) out of {len(df_viet)} total rows.")
+    
     if not viet_sentences:
         raise ValueError(f"No valid Vietnamese sentences found after cleaning in {viet_file}.")
         

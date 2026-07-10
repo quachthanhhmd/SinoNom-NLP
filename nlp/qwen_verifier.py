@@ -73,17 +73,17 @@ class QwenVerifier:
 
     def _build_prompt(self, han: str, viet: str) -> str:
         """Create the zero-shot evaluation prompt for Qwen."""
-        system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam. Nhiệm vụ của bạn là đánh giá chất lượng dóng hàng dịch thuật."
-        user_content = f"""Hãy đánh giá xem câu tiếng Việt có phải là bản dịch chính xác của câu chữ Hán hay không.
+        system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam. Nhiệm vụ của bạn là đánh giá chất lượng dóng hàng để xây dựng tập dữ liệu song song sạch (Gold parallel corpus) cho dịch máy."
+        user_content = f"""Hãy đánh giá xem câu tiếng Việt và câu chữ Hán dưới đây có phải là bản dịch sạch, khớp thông tin 1-1 trực tiếp hay không.
 Chỉ trả lời bằng duy nhất một chữ số từ 0 đến 5, không giải thích gì thêm:
-  5: Dịch chính xác, đầy đủ nghĩa (chấp nhận có thêm chú thích của dịch giả như năm dương lịch, phiên âm, hoặc giải thích từ ngữ trong ngoặc đơn).
-  4: Dịch đúng hầu hết thông tin cốt lõi, có thể thừa/thiếu một vài chi tiết nhỏ không quan trọng.
-  3: Dịch đúng một phần nhưng thiếu nhiều thông tin quan trọng (dịch thiếu).
-  2: Có liên quan về mặt từ ngữ nhưng dịch sai nghĩa hoàn toàn.
-  1: Rất ít liên quan.
+  5: Dịch chính xác, đầy đủ nghĩa, khớp thông tin trực tiếp 1-1, KHÔNG có chú thích dịch giả hay từ ngữ giải nghĩa thêm.
+  4: Dịch đúng thông tin cốt lõi, khớp trực tiếp, có thể thừa/thiếu một vài trợ từ không quan trọng.
+  3: Dịch đúng nhưng chứa thông tin thừa do dịch giả chú thích thêm trong ngoặc đơn (ví dụ: chú thích năm dương lịch, chú thích chữ Hán phụ) mà bản Hán gốc không có.
+  2: Dịch thiếu rất nhiều thông tin cốt lõi hoặc chứa quá nhiều văn bản diễn giải dài dòng của dịch giả.
+  1: Rất ít liên quan về mặt nội dung.
   0: Hoàn toàn không liên quan hoặc là hai câu khác nhau.
 
-LƯU Ý: Nếu câu tiếng Việt có thêm các từ chú thích địa danh, năm dương lịch trong ngoặc đơn, hoặc từ ngữ giải nghĩa của dịch giả mà không có trong Hán cổ, vẫn tính là dịch chính xác (điểm 5).
+LƯU Ý QUAN TRỌNG: Để phục vụ huấn luyện dịch máy (Machine Translation), chúng ta cần tránh dữ liệu rác (hallucination). Vì vậy, các câu tiếng Việt có chứa chú thích của dịch giả trong ngoặc đơn hoặc diễn giải thêm mà bản Hán không có phải bị chấm điểm thấp (chấm 3 hoặc 2) để hệ thống tự động loại bỏ.
 
 Câu Hán: {han}
 Câu Việt: {viet}

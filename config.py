@@ -58,7 +58,7 @@ ENSEMBLE_CONFIG = {
         "device_map": "auto",
         "uncertain_low": 0.32,
         "uncertain_high": 0.50,
-        "keep_threshold": 3,
+        "keep_threshold": 4,
         "batch_size": 8,
     },
 }

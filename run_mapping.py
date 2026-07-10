@@ -4,7 +4,7 @@ import pandas as pd
 import argparse
 from typing import List, Dict, Tuple
 from nlp.aligner import EmbeddingSentenceAligner, EnsembleSentenceAligner
-from utils.exporters import CorpusExporter
+from utils.exporters import CorpusExporter, clean_vietnamese_text
 
 
 def detect_separator(file_path: str) -> str:
@@ -170,8 +170,9 @@ def process_alignment_group(
     viet_sentences = []
     for _, row in df_viet.iterrows():
         sent = str(row['sentence']).strip()
-        if clean_vietnamese_sentence(sent):
-            viet_sentences.append(sent)
+        cleaned_sent = clean_vietnamese_text(sent)
+        if clean_vietnamese_sentence(cleaned_sent):
+            viet_sentences.append(cleaned_sent)
             
     if not viet_sentences:
         print("[Warning] No valid Vietnamese sentences found after cleaning. Skipping group.")

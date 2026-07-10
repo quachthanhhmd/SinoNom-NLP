@@ -118,11 +118,17 @@ class SimAlignScorer(BaseScorer):
             # argsort sorts ascending, so we take the last top_k elements and reverse
             top_k_indices = np.argsort(row_scores)[-self.top_k:][::-1]
 
+            # Optimization: skip candidates with reference score < 0.25
+            # since they are too dissimilar to ever be aligned by DP (threshold 0.32)
+            valid_indices = [j for j in top_k_indices if row_scores[j] >= 0.25]
+            if not valid_indices:
+                continue
+
             han_sent = han_sentences[i]
             if not han_sent.strip():
                 continue
 
-            for j in top_k_indices:
+            for j in valid_indices:
                 viet_sent = viet_sentences[j]
                 if not viet_sent.strip():
                     continue

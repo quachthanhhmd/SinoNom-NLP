@@ -158,5 +158,9 @@ class SimAlignScorer(BaseScorer):
                     # Handle tokenization errors or out-of-vocabulary gracefully
                     scores[i, j] = 0.0
 
+            # Log progress every 100 sentences
+            if (i + 1) % 100 == 0 or (i + 1) == M:
+                print(f"[{self.name}]   Progress: {i + 1}/{M} Han sentences processed...")
+
         print(f"[{self.name}] Computed {align_count} sentence pairs. Done. ({time.time() - t0:.2f}s)")
         return scores

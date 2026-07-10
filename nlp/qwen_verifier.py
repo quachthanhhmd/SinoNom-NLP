@@ -43,7 +43,6 @@ class QwenVerifier:
         import requests
         import os
         import json
-        import time
         
         # Load API keys
         raw_key = self.config.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
@@ -302,7 +301,6 @@ Câu Việt: {viet}
 
         if is_gemini:
             print(f"[Gemini] Running verification sequentially (with 2.0s sleep to avoid rate limits)...")
-            import time
             for idx in uncertain_pairs_indices:
                 pair = aligned_pairs[idx]
                 system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam. Nhiệm vụ của bạn là đánh giá chất lượng dóng hàng để xây dựng tập dữ liệu song song sạch (Gold parallel corpus) cho dịch máy."

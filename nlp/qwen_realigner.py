@@ -63,7 +63,6 @@ class QwenRealigner:
         import requests
         import os
         import json
-        import time
         
         # Load API keys
         raw_key = self.config.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
@@ -620,7 +619,6 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                 
                 combined_new_pairs.extend(new_pairs)
                 if is_gemini:
-                    import time
                     time.sleep(2.0)
 
             # Replace the cluster slice with the combined re-aligned and/or fallback pairs

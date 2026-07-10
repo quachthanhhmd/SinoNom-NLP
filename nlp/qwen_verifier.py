@@ -73,20 +73,22 @@ class QwenVerifier:
 
     def _build_prompt(self, han: str, viet: str) -> str:
         """Create the zero-shot evaluation prompt for Qwen."""
-        system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam."
-        user_content = f"""Hãy đánh giá chất lượng dóng hàng giữa câu chữ Hán và câu tiếng Việt dưới đây.
-Chỉ trả lời bằng một số nguyên từ 0 đến 5:
-  0 = Hoàn toàn không liên quan
-  1 = Rất ít liên quan
-  2 = Liên quan nhưng dịch sai nghĩa
-  3 = Liên quan, dịch đúng nhưng không đầy đủ
-  4 = Dịch đúng và gần đầy đủ
-  5 = Dịch chính xác và đầy đủ ý nghĩa
+        system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam. Nhiệm vụ của bạn là đánh giá chất lượng dóng hàng dịch thuật."
+        user_content = f"""Hãy đánh giá xem câu tiếng Việt có phải là bản dịch chính xác của câu chữ Hán hay không.
+Chỉ trả lời bằng duy nhất một chữ số từ 0 đến 5, không giải thích gì thêm:
+  5: Dịch chính xác, đầy đủ nghĩa (chấp nhận có thêm chú thích của dịch giả như năm dương lịch, phiên âm, hoặc giải thích từ ngữ trong ngoặc đơn).
+  4: Dịch đúng hầu hết thông tin cốt lõi, có thể thừa/thiếu một vài chi tiết nhỏ không quan trọng.
+  3: Dịch đúng một phần nhưng thiếu nhiều thông tin quan trọng (dịch thiếu).
+  2: Có liên quan về mặt từ ngữ nhưng dịch sai nghĩa hoàn toàn.
+  1: Rất ít liên quan.
+  0: Hoàn toàn không liên quan hoặc là hai câu khác nhau.
+
+LƯU Ý: Nếu câu tiếng Việt có thêm các từ chú thích địa danh, năm dương lịch trong ngoặc đơn, hoặc từ ngữ giải nghĩa của dịch giả mà không có trong Hán cổ, vẫn tính là dịch chính xác (điểm 5).
 
 Câu Hán: {han}
 Câu Việt: {viet}
 
-Điểm:"""
+Điểm số:"""
 
         # Format prompt using Qwen Chat Template
         messages = [
@@ -101,12 +103,18 @@ Câu Việt: {viet}
 
     def _parse_score(self, text: str) -> int:
         """Extract a single integer score (0-5) from Qwen's response."""
-        # Find any digit in the response, prefer the first one
-        match = re.search(r"\b([0-5])\b", text.strip())
+        text_clean = text.strip()
+        # Look for a digit at the very beginning of the response first
+        match_start = re.match(r"^([0-5])", text_clean)
+        if match_start:
+            return int(match_start.group(1))
+            
+        # Fallback search for any digit in the response, prefer the first one
+        match = re.search(r"\b([0-5])\b", text_clean)
         if match:
             return int(match.group(1))
         # Fallback search for any digit
-        match_any = re.search(r"(\d)", text.strip())
+        match_any = re.search(r"(\d)", text_clean)
         if match_any:
             val = int(match_any.group(1))
             return min(max(val, 0), 5)
@@ -182,7 +190,7 @@ Câu Việt: {viet}
                 with torch.no_grad():
                     outputs = self._model.generate(
                         **inputs,
-                        max_new_tokens=10,
+                        max_new_tokens=15,
                         do_sample=False,  # deterministic greedy decoding for rating
                         pad_token_id=self._tokenizer.eos_token_id,
                     )
@@ -193,6 +201,13 @@ Câu Việt: {viet}
                     response_tokens = outputs[i][input_len:]
                     response_text = self._tokenizer.decode(response_tokens, skip_special_tokens=True)
                     score = self._parse_score(response_text)
+
+                    # In log debug cho 5 cặp đầu tiên của đợt xác thực
+                    if idx in uncertain_pairs_indices[:5]:
+                        print(f"[Qwen Debug] Cặp #{idx}:")
+                        print(f"  Hán:  {repr(aligned_pairs[idx]['han_sentence'])}")
+                        print(f"  Việt: {repr(aligned_pairs[idx]['viet_sentence'])}")
+                        print(f"  Raw:  {repr(response_text)} -> Score parsed: {score}")
 
                     # Set results
                     aligned_pairs[idx]["qwen_score"] = score
@@ -213,7 +228,7 @@ Câu Việt: {viet}
                             with torch.no_grad():
                                 p_outputs = self._model.generate(
                                     **p_inputs,
-                                    max_new_tokens=10,
+                                    max_new_tokens=15,
                                     do_sample=False,
                                     pad_token_id=self._tokenizer.eos_token_id,
                                 )
@@ -221,6 +236,13 @@ Câu Việt: {viet}
                             p_response_tokens = p_outputs[0][p_input_len:]
                             p_response_text = self._tokenizer.decode(p_response_tokens, skip_special_tokens=True)
                             score = self._parse_score(p_response_text)
+                            
+                            # In log debug cho chế độ tuần tự nếu thuộc 5 cặp đầu tiên
+                            if idx in uncertain_pairs_indices[:5]:
+                                print(f"[Qwen Seq Debug] Cặp #{idx}:")
+                                print(f"  Hán:  {repr(pair['han_sentence'])}")
+                                print(f"  Việt: {repr(pair['viet_sentence'])}")
+                                print(f"  Raw:  {repr(p_response_text)} -> Score parsed: {score}")
                             
                             aligned_pairs[idx]["qwen_score"] = score
                             aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)

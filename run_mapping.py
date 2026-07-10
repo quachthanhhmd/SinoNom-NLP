@@ -197,13 +197,21 @@ def process_alignment_group(
     os.makedirs(cache_dir, exist_ok=True)
     phase1_cache = os.path.join(cache_dir, f"{group_key}_phase1.json")
     phase2_cache = os.path.join(cache_dir, f"{group_key}_phase2.json")
+    phase3_cache = os.path.join(cache_dir, f"{group_key}_phase3.json")
     
     raw_aligned = None
     run_phase1 = True
     run_phase2 = True
     
     # 3. Perform Alignment (or load from cache if available)
-    if realign_enabled and os.path.exists(phase2_cache):
+    if realign_enabled and os.path.exists(phase3_cache):
+        print(f"[Cache] Found Phase 3 cached/checkpoint alignment at: {phase3_cache}")
+        print(f"[Cache] Loading cache to resume or skip Phase 1 and 2...")
+        with open(phase3_cache, "r", encoding="utf-8") as f:
+            raw_aligned = json.load(f)
+        run_phase1 = False
+        run_phase2 = False
+    elif realign_enabled and os.path.exists(phase2_cache):
         print(f"[Cache] Found Phase 2 cached alignment at: {phase2_cache}")
         print(f"[Cache] Loading cache to skip Phase 1 (SimAlign) and Phase 2 (Verification)...")
         with open(phase2_cache, "r", encoding="utf-8") as f:
@@ -274,7 +282,7 @@ def process_alignment_group(
             model=qwen_model,
             tokenizer=qwen_tokenizer
         )
-        raw_aligned = realigner.realign(raw_aligned)
+        raw_aligned = realigner.realign(raw_aligned, cache_path=phase3_cache)
 
     # 4. Map the aligned pairs back to their respective volumes
     # Backtrack aligned sentences using the original indices to figure out the volume

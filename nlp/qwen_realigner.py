@@ -449,19 +449,37 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
     # Public API
     # ------------------------------------------------------------------ #
 
-    def realign(self, aligned_pairs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def realign(
+        self, aligned_pairs: List[Dict[str, Any]], cache_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Phase 3: Detect NaN clusters and re-align them using Qwen.
+        Phase 3: Detect NaN clusters and re-align them using Qwen/Gemini.
 
         Args:
             aligned_pairs: List of dicts from Phase 2 output.
+            cache_path: Optional path to save intermediate/final Phase 3 JSON output.
 
         Returns:
             Updated list with NaN clusters replaced by Qwen's re-alignments.
         """
+        import json
+        import os
+
+        # Resume from checkpoint if cache_path exists
+        if cache_path and os.path.exists(cache_path):
+            print(f"[Cache] Found Phase 3 checkpoint/cached alignment at: {cache_path}")
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cached_data = json.load(f)
+                if cached_data:
+                    aligned_pairs = cached_data
+                    print(f"[Cache] Successfully loaded Phase 3 checkpoint. Resuming...")
+            except Exception as e:
+                print(f"[Cache] Warning: Failed to load Phase 3 cache: {e}. Starting fresh...")
+
         clusters = self._detect_nan_clusters(aligned_pairs)
         if not clusters:
-            print("[QwenRealign] No NaN clusters found. Phase 3 skipped.")
+            print("[QwenRealign] No NaN clusters found. Phase 3 completed/skipped.")
             return aligned_pairs
 
         print(f"[QwenRealign] Found {len(clusters)} NaN cluster(s) to re-align.")
@@ -611,6 +629,15 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                 f"[QwenRealign] Cluster [{cluster_start}:{cluster_end}] replaced with "
                 f"{len(combined_new_pairs)} pair(s)."
             )
+            
+            # Save progress to checkpoint cache
+            if cache_path:
+                try:
+                    with open(cache_path, "w", encoding="utf-8") as f:
+                        json.dump(aligned_pairs, f, ensure_ascii=False, indent=2)
+                    print(f"[Cache] Saved Phase 3 checkpoint to: {cache_path}")
+                except Exception as e:
+                    print(f"[Cache] Warning: Failed to save Phase 3 checkpoint: {e}")
 
         print(
             f"[QwenRealign] Phase 3 complete. "

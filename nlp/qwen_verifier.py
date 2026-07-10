@@ -55,21 +55,29 @@ class QwenVerifier:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        model_kwargs = {"device_map": self.device_map, "torch_dtype": torch.float16}
+        model_kwargs = {"device_map": self.device_map}
         if self.load_in_4bit:
             # Requires bitsandbytes and accelerate packages
             try:
                 import accelerate
                 import bitsandbytes
+                from transformers import BitsAndBytesConfig
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4"
+                )
+                model_kwargs["quantization_config"] = quantization_config
             except ImportError:
                 print(
                     "[Qwen] Warning: bitsandbytes or accelerate not installed. "
                     "Attempting to load model without 4-bit quantization."
                 )
                 self.load_in_4bit = False
-
-        if self.load_in_4bit:
-            model_kwargs["load_in_4bit"] = True
+                model_kwargs["torch_dtype"] = torch.float16
+        else:
+            model_kwargs["torch_dtype"] = torch.float16
 
         self._model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
         print(f"[Qwen] Model loaded. ({time.time() - t0:.1f}s)")

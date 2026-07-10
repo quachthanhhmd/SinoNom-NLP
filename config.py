@@ -53,7 +53,8 @@ ENSEMBLE_CONFIG = {
     },
     "qwen_verifier": {
         "enabled": True,
-        "model_name": "gemini-3.1-flash-lite",
+        "verifier_model_name": "Qwen/Qwen2.5-7B-Instruct",  # Chạy offline miễn phí ở Phase 2
+        "realigner_model_name": "gemini-3.1-flash-lite",    # Dùng Gemini API thông minh ở Phase 3
         "api_key": "",  # Có thể điền trực tiếp API Key vào đây hoặc thông qua biến môi trường GEMINI_API_KEY
         "load_in_4bit": True,
         "device_map": "auto",

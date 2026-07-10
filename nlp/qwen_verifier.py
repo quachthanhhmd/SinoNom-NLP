@@ -24,7 +24,7 @@ class QwenVerifier:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         # Fallback to default config if none provided
         self.config = config or ENSEMBLE_CONFIG.get("qwen_verifier", {})
-        self.model_name = self.config.get("model_name", "Qwen/Qwen2.5-7B-Instruct")
+        self.model_name = self.config.get("verifier_model_name") or self.config.get("model_name", "Qwen/Qwen2.5-7B-Instruct")
         self.load_in_4bit = self.config.get("load_in_4bit", True)
         self.device_map = self.config.get("device_map", "auto")
         self.uncertain_low = self.config.get("uncertain_low", 0.38)

@@ -47,7 +47,7 @@ class QwenRealigner:
             tokenizer:  Optional pre-loaded Qwen tokenizer.
         """
         self.config = config or ENSEMBLE_CONFIG.get("qwen_verifier", {})
-        self.model_name = self.config.get("model_name", "Qwen/Qwen2.5-7B-Instruct")
+        self.model_name = self.config.get("realigner_model_name") or self.config.get("model_name", "gemini-3.1-flash-lite")
         self.load_in_4bit = self.config.get("load_in_4bit", True)
         self.device_map = self.config.get("device_map", "auto")
         self.batch_size = self.config.get("batch_size", 4)

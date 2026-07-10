@@ -53,7 +53,7 @@ ENSEMBLE_CONFIG = {
     },
     "qwen_verifier": {
         "enabled": True,
-        "model_name": "gemini-2.0-flash-lite",
+        "model_name": "gemini-3.1-flash-lite",
         "api_key": "",  # Có thể điền trực tiếp API Key vào đây hoặc thông qua biến môi trường GEMINI_API_KEY
         "load_in_4bit": True,
         "device_map": "auto",

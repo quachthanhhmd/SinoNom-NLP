@@ -166,6 +166,9 @@ class QwenRealigner:
     # ------------------------------------------------------------------ #
 
     def _build_realign_prompt(self, han_sentences: List[str], viet_sentences: List[str]) -> str:
+        num_han = len(han_sentences)
+        num_viet = len(viet_sentences)
+        
         han_numbered = "\n".join(f"  H{i+1}: {s}" for i, s in enumerate(han_sentences))
         viet_numbered = "\n".join(f"  V{j+1}: {s}" for j, s in enumerate(viet_sentences))
 
@@ -173,17 +176,38 @@ class QwenRealigner:
             "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam với kinh nghiệm sâu rộng "
             "về Đại Nam Nhất Thống Chí."
         )
+        
+        # Build dynamic example JSON based on the count of Viet sentences
+        if num_viet == 1:
+            example_json = (
+                f"[\n"
+                f"  {{\"han\": \"H1+H2\", \"viet\": \"V1\"}},\n"
+                f"  {{\"han\": \"H3\", \"viet\": null}}\n"
+                f"]"
+            )
+        else:
+            example_json = (
+                f"[\n"
+                f"  {{\"han\": \"H1\", \"viet\": \"V1\"}},\n"
+                f"  {{\"han\": \"H2+H3\", \"viet\": \"V2\"}},\n"
+                f"  {{\"han\": \"H4\", \"viet\": null}},\n"
+                f"  {{\"han\": null, \"viet\": \"V{num_viet}\"}}\n"
+                f"]"
+            )
+
         user_content = f"""Dưới đây là các câu chữ Hán cổ và các câu dịch tiếng Việt tương ứng bị lệch pha (không được dóng hàng đúng chỗ).
 
 Nhiệm vụ của bạn: Dóng hàng lại các câu Hán và Việt dưới đây một cách CHÍNH XÁC NHẤT.
 
-QUY TẮC:
-- Mỗi cặp JSON phải có "han" (chứa mã tham chiếu câu Hán, ví dụ: "H1", hoặc nhiều câu gộp như "H1+H2") và "viet" (chứa mã tham chiếu câu Việt, ví dụ: "V1", hoặc nhiều câu gộp như "V1+V2").
-- BẮT BUỘC dùng mã số thứ tự H1, H2... cho Hán và V1, V2... cho Việt để điền vào trường "han" và "viet". KHÔNG ĐƯỢC tự ý viết lại toàn bộ nội dung văn bản gốc vào JSON.
-- Mỗi câu CHỈ được dùng một lần.
-- Nếu một câu Hán không tìm được câu Việt phù hợp, đặt "viet": null.
-- Nếu một câu Việt không tìm được câu Hán phù hợp, đặt "han": null.
-- Trả lời ĐÚNG định dạng JSON, không giải thích thêm.
+QUY TẮC BẮT BUỘC:
+1. Chỉ được dùng các mã Hán từ H1 đến H{num_han} và các mã Việt từ V1 đến V{num_viet} (dựa theo danh sách CÁC CÂU HÁN và CÁC CÂU VIỆT bên dưới).
+2. TUYỆT ĐỐI KHÔNG sử dụng các mã câu không tồn tại trong danh sách (Ví dụ: nếu danh sách chỉ có V1 thì không được dùng V2, V3...).
+3. Mỗi cặp JSON phải có "han" (chứa mã tham chiếu câu Hán, ví dụ: "H1", hoặc nhiều câu gộp như "H1+H2") và "viet" (chứa mã tham chiếu câu Việt, ví dụ: "V1", hoặc nhiều câu gộp như "V1+V2").
+4. BẮT BUỘC dùng mã số thứ tự H1, H2... cho Hán và V1, V2... cho Việt. KHÔNG ĐƯỢC tự ý viết lại toàn bộ nội dung văn bản gốc vào JSON.
+5. Mỗi câu CHỈ được dùng một lần.
+6. Nếu một câu Hán không tìm được câu Việt phù hợp, đặt "viet": null.
+7. Nếu một câu Việt không tìm được câu Hán phù hợp, đặt "han": null.
+8. Trả lời ĐÚNG định dạng JSON, không giải thích thêm.
 
 CÁC CÂU HÁN:
 {han_numbered}
@@ -191,13 +215,8 @@ CÁC CÂU HÁN:
 CÁC CÂU VIỆT:
 {viet_numbered}
 
-Ví dụ kết quả dóng hàng mong muốn (JSON array):
-[
-  {{"han": "H1", "viet": "V1"}},
-  {{"han": "H2+H3", "viet": "V2"}},
-  {{"han": "H4", "viet": null}},
-  {{"han": null, "viet": "V3"}}
-]
+Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
+{example_json}
 """
         messages = [
             {"role": "system", "content": system_content},

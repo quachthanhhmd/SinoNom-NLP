@@ -505,9 +505,9 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                 if not h_is_nan:
                     cluster_han_indices.append(item.get("han_indices", []))
 
-            # Proportional slicing for large clusters to prevent VRAM OOM (only for local model, Gemini can handle it directly but keep it for index preservation)
+            # Proportional slicing for large clusters to prevent VRAM OOM (only for local model, Gemini has massive context)
             sub_clusters = []
-            if len(cluster_han) > 12 or len(cluster_viet) > 12:
+            if not is_gemini and (len(cluster_han) > 12 or len(cluster_viet) > 12):
                 n_han = len(cluster_han)
                 n_viet = len(cluster_viet)
                 max_len = max(n_han, n_viet)

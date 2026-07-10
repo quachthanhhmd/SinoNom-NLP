@@ -53,7 +53,7 @@ ENSEMBLE_CONFIG = {
     },
     "qwen_verifier": {
         "enabled": True,
-        "model_name": "Qwen/Qwen2.5-7B-Instruct",
+        "model_name": "Qwen/Qwen2.5-32B-Instruct",
         "load_in_4bit": True,
         "device_map": "auto",
         "uncertain_low": 0.32,

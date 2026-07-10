@@ -178,8 +178,8 @@ class QwenRealigner:
 Nhiệm vụ của bạn: Dóng hàng lại các câu Hán và Việt dưới đây một cách CHÍNH XÁC NHẤT.
 
 QUY TẮC:
-- Mỗi cặp JSON phải có "han" (một hoặc nhiều câu Hán gộp lại) và "viet" (một hoặc nhiều câu Việt gộp lại).
-- Dùng số thứ tự để tham chiếu câu (H1, H2... cho Hán; V1, V2... cho Việt).
+- Mỗi cặp JSON phải có "han" (chứa mã tham chiếu câu Hán, ví dụ: "H1", hoặc nhiều câu gộp như "H1+H2") và "viet" (chứa mã tham chiếu câu Việt, ví dụ: "V1", hoặc nhiều câu gộp như "V1+V2").
+- BẮT BUỘC dùng mã số thứ tự H1, H2... cho Hán và V1, V2... cho Việt để điền vào trường "han" và "viet". KHÔNG ĐƯỢC tự ý viết lại toàn bộ nội dung văn bản gốc vào JSON.
 - Mỗi câu CHỈ được dùng một lần.
 - Nếu một câu Hán không tìm được câu Việt phù hợp, đặt "viet": null.
 - Nếu một câu Việt không tìm được câu Hán phù hợp, đặt "han": null.
@@ -191,10 +191,12 @@ CÁC CÂU HÁN:
 CÁC CÂU VIỆT:
 {viet_numbered}
 
-Kết quả dóng hàng (JSON array):
+Ví dụ kết quả dóng hàng mong muốn (JSON array):
 [
-  {{"han": "...", "viet": "..."}},
-  ...
+  {{"han": "H1", "viet": "V1"}},
+  {{"han": "H2+H3", "viet": "V2"}},
+  {{"han": "H4", "viet": null}},
+  {{"han": null, "viet": "V3"}}
 ]
 """
         messages = [
@@ -424,7 +426,7 @@ Kết quả dóng hàng (JSON array):
                 with torch.no_grad():
                     output_tokens = self._model.generate(
                         **inputs,
-                        max_new_tokens=min(50 * (len(sub_han) + len(sub_viet)), 1024),
+                        max_new_tokens=512,
                         do_sample=False,
                         pad_token_id=self._tokenizer.eos_token_id,
                     )

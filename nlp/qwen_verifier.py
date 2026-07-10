@@ -39,8 +39,60 @@ class QwenVerifier:
     # Internal helpers
     # ------------------------------------------------------------------ #
 
+    def _call_gemini(self, prompt: str, is_json: bool = False) -> str:
+        import requests
+        import os
+        import json
+        import time
+        
+        # Load API key
+        api_key = self.config.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "Gemini API key is missing. Please set GEMINI_API_KEY environment variable "
+                "or specify 'api_key' in config.py under qwen_verifier."
+            )
+            
+        model = self.model_name # e.g. "gemini-2.0-flash-lite"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": 0.0
+            }
+        }
+        if is_json:
+            payload["generationConfig"]["responseMimeType"] = "application/json"
+            
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                if response.status_code == 200:
+                    result = response.json()
+                    return result['candidates'][0]['content']['parts'][0]['text']
+                elif response.status_code == 429:
+                    # Rate limit hit (429) - wait with backoff
+                    sleep_time = (2 ** attempt) + 2
+                    print(f"[Gemini] Rate limit (429) hit. Retrying in {sleep_time}s...")
+                    time.sleep(sleep_time)
+                else:
+                    raise ValueError(f"Gemini API returned error {response.status_code}: {response.text}")
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise e
+                time.sleep(2)
+        raise ValueError("Failed to call Gemini API after max retries.")
+
     def _load_model(self):
         """Lazy load Qwen model and tokenizer."""
+        if self.model_name.lower().startswith("gemini"):
+            return
+            
         if self._model is not None:
             return
 
@@ -177,99 +229,139 @@ Câu Việt: {viet}
             print("[Qwen] No pairs need LLM verification. Skipping Qwen Phase 2.")
             return aligned_pairs
 
-        # Load Qwen model (lazily)
-        self._load_model()
+        # Load Qwen model (lazily) if not Gemini
+        is_gemini = self.model_name.lower().startswith("gemini")
+        if not is_gemini:
+            self._load_model()
 
-        print(f"[Qwen] Running batch verification (batch_size={self.batch_size})...")
         t0 = time.time()
         processed = 0
 
-        # Batch processing
-        for batch_start in range(0, total_uncertain, self.batch_size):
-            batch_indices = uncertain_pairs_indices[batch_start : batch_start + self.batch_size]
-            prompts = []
-            for idx in batch_indices:
+        if is_gemini:
+            print(f"[Gemini] Running verification sequentially (with 2.0s sleep to avoid rate limits)...")
+            import time
+            for idx in uncertain_pairs_indices:
                 pair = aligned_pairs[idx]
-                prompts.append(self._build_prompt(pair["han_sentence"], pair["viet_sentence"]))
+                system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam. Nhiệm vụ của bạn là đánh giá chất lượng dóng hàng để xây dựng tập dữ liệu song song sạch (Gold parallel corpus) cho dịch máy."
+                user_content = f"""Hãy đánh giá xem câu tiếng Việt và câu chữ Hán dưới đây có phải là bản dịch sạch, khớp thông tin 1-1 trực tiếp hay không.
+Chỉ trả lời bằng duy nhất một chữ số từ 0 đến 5, không giải thích gì thêm:
+  5: Dịch chính xác, đầy đủ nghĩa, khớp thông tin trực tiếp 1-1, KHÔNG có chú thích dịch giả hay từ ngữ giải nghĩa thêm.
+  4: Dịch đúng thông tin cốt lõi, khớp trực tiếp, có thể thừa/thiếu một vài trợ từ không quan trọng.
+  3: Dịch đúng nhưng chứa thông tin thừa do dịch giả chú thích thêm trong ngoặc đơn (ví dụ: chú thích năm dương lịch, chú thích chữ Hán phụ) mà bản Hán gốc không có.
+  2: Dịch thiếu rất nhiều thông tin cốt lõi hoặc chứa quá nhiều văn bản diễn giải dài dòng của dịch giả.
+  1: Rất ít liên quan về mặt nội dung.
+  0: Hoàn toàn không liên quan hoặc là hai câu khác nhau.
 
-            import torch
-            try:
-                # Tokenize batch
-                inputs = self._tokenizer(prompts, return_tensors="pt", padding=True).to(self._model.device)
+LƯU Ý QUAN TRỌNG: Để phục vụ huấn luyện dịch máy (Machine Translation), chúng ta cần tránh dữ liệu rác (hallucination). Vì vậy, các câu tiếng Việt có chứa chú thích của dịch giả trong ngoặc đơn hoặc diễn giải thêm mà bản Hán không có phải bị chấm điểm thấp (chấm 3 hoặc 2) để hệ thống tự động loại bỏ.
 
-                # Generate
-                with torch.no_grad():
-                    outputs = self._model.generate(
-                        **inputs,
-                        max_new_tokens=15,
-                        do_sample=False,  # deterministic greedy decoding for rating
-                        pad_token_id=self._tokenizer.eos_token_id,
-                    )
+Câu Hán: {pair["han_sentence"]}
+Câu Việt: {pair["viet_sentence"]}
 
-                # Decode responses
-                input_len = inputs.input_ids.shape[1]
-                for i, idx in enumerate(batch_indices):
-                    response_tokens = outputs[i][input_len:]
-                    response_text = self._tokenizer.decode(response_tokens, skip_special_tokens=True)
-                    score = self._parse_score(response_text)
+Điểm số:"""
+                prompt = f"{system_content}\n\n{user_content}"
+                response_text = self._call_gemini(prompt, is_json=False)
+                score = self._parse_score(response_text)
 
-                    # In log debug cho 5 cặp đầu tiên của đợt xác thực
-                    if idx in uncertain_pairs_indices[:5]:
-                        print(f"[Qwen Debug] Cặp #{idx}:")
-                        print(f"  Hán:  {repr(aligned_pairs[idx]['han_sentence'])}")
-                        print(f"  Việt: {repr(aligned_pairs[idx]['viet_sentence'])}")
-                        print(f"  Raw:  {repr(response_text)} -> Score parsed: {score}")
+                if idx in uncertain_pairs_indices[:5]:
+                    print(f"[Gemini Debug] Cặp #{idx}:")
+                    print(f"  Hán:  {repr(pair['han_sentence'])}")
+                    print(f"  Việt: {repr(pair['viet_sentence'])}")
+                    print(f"  Raw:  {repr(response_text)} -> Score parsed: {score}")
 
-                    # Set results
-                    aligned_pairs[idx]["qwen_score"] = score
-                    aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
+                aligned_pairs[idx]["qwen_score"] = score
+                aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
+                processed += 1
+                if processed < total_uncertain:
+                    time.sleep(2.0)
+            print(f"[Gemini] Processed {processed}/{total_uncertain} uncertain pairs...")
+        else:
+            print(f"[Qwen] Running batch verification (batch_size={self.batch_size})...")
+            # Batch processing
+            for batch_start in range(0, total_uncertain, self.batch_size):
+                batch_indices = uncertain_pairs_indices[batch_start : batch_start + self.batch_size]
+                prompts = []
+                for idx in batch_indices:
+                    pair = aligned_pairs[idx]
+                    prompts.append(self._build_prompt(pair["han_sentence"], pair["viet_sentence"]))
 
-            except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    print(f"[Qwen] Warning: CUDA Out of Memory with batch_size={len(prompts)}. Falling back to sequential execution (batch_size=1) for this batch...")
-                    torch.cuda.empty_cache()
-                    
-                    # Process sequentially
-                    for idx in batch_indices:
-                        pair = aligned_pairs[idx]
-                        p_prompt = self._build_prompt(pair["han_sentence"], pair["viet_sentence"])
-                        p_inputs = self._tokenizer([p_prompt], return_tensors="pt").to(self._model.device)
+                import torch
+                try:
+                    # Tokenize batch
+                    inputs = self._tokenizer(prompts, return_tensors="pt", padding=True).to(self._model.device)
+
+                    # Generate
+                    with torch.no_grad():
+                        outputs = self._model.generate(
+                            **inputs,
+                            max_new_tokens=15,
+                            do_sample=False,  # deterministic greedy decoding for rating
+                            pad_token_id=self._tokenizer.eos_token_id,
+                        )
+
+                    # Decode responses
+                    input_len = inputs.input_ids.shape[1]
+                    for i, idx in enumerate(batch_indices):
+                        response_tokens = outputs[i][input_len:]
+                        response_text = self._tokenizer.decode(response_tokens, skip_special_tokens=True)
+                        score = self._parse_score(response_text)
+
+                        # In log debug cho 5 cặp đầu tiên của đợt xác thực
+                        if idx in uncertain_pairs_indices[:5]:
+                            print(f"[Qwen Debug] Cặp #{idx}:")
+                            print(f"  Hán:  {repr(aligned_pairs[idx]['han_sentence'])}")
+                            print(f"  Việt: {repr(aligned_pairs[idx]['viet_sentence'])}")
+                            print(f"  Raw:  {repr(response_text)} -> Score parsed: {score}")
+
+                        # Set results
+                        aligned_pairs[idx]["qwen_score"] = score
+                        aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
+
+                except RuntimeError as e:
+                    if "CUDA out of memory" in str(e):
+                        print(f"[Qwen] Warning: CUDA Out of Memory with batch_size={len(prompts)}. Falling back to sequential execution (batch_size=1) for this batch...")
+                        torch.cuda.empty_cache()
                         
-                        try:
-                            with torch.no_grad():
-                                p_outputs = self._model.generate(
-                                    **p_inputs,
-                                    max_new_tokens=15,
-                                    do_sample=False,
-                                    pad_token_id=self._tokenizer.eos_token_id,
-                                )
-                            p_input_len = p_inputs.input_ids.shape[1]
-                            p_response_tokens = p_outputs[0][p_input_len:]
-                            p_response_text = self._tokenizer.decode(p_response_tokens, skip_special_tokens=True)
-                            score = self._parse_score(p_response_text)
+                        # Process sequentially
+                        for idx in batch_indices:
+                            pair = aligned_pairs[idx]
+                            p_prompt = self._build_prompt(pair["han_sentence"], pair["viet_sentence"])
+                            p_inputs = self._tokenizer([p_prompt], return_tensors="pt").to(self._model.device)
                             
-                            # In log debug cho chế độ tuần tự nếu thuộc 5 cặp đầu tiên
-                            if idx in uncertain_pairs_indices[:5]:
-                                print(f"[Qwen Seq Debug] Cặp #{idx}:")
-                                print(f"  Hán:  {repr(pair['han_sentence'])}")
-                                print(f"  Việt: {repr(pair['viet_sentence'])}")
-                                print(f"  Raw:  {repr(p_response_text)} -> Score parsed: {score}")
-                            
-                            aligned_pairs[idx]["qwen_score"] = score
-                            aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
-                        except RuntimeError as p_e:
-                            if "CUDA out of memory" in str(p_e):
-                                print("[Qwen] Critical: CUDA Out of Memory even with batch_size=1! Skipping verification for this pair.")
-                                torch.cuda.empty_cache()
-                                aligned_pairs[idx]["qwen_score"] = 0
-                                aligned_pairs[idx]["verified"] = False
-                            else:
-                                raise p_e
-                else:
-                    raise e
+                            try:
+                                with torch.no_grad():
+                                    p_outputs = self._model.generate(
+                                        **p_inputs,
+                                        max_new_tokens=15,
+                                        do_sample=False,
+                                        pad_token_id=self._tokenizer.eos_token_id,
+                                    )
+                                p_input_len = p_inputs.input_ids.shape[1]
+                                p_response_tokens = p_outputs[0][p_input_len:]
+                                p_response_text = self._tokenizer.decode(p_response_tokens, skip_special_tokens=True)
+                                score = self._parse_score(p_response_text)
+                                
+                                # In log debug cho chế độ tuần tự nếu thuộc 5 cặp đầu tiên
+                                if idx in uncertain_pairs_indices[:5]:
+                                    print(f"[Qwen Seq Debug] Cặp #{idx}:")
+                                    print(f"  Hán:  {repr(pair['han_sentence'])}")
+                                    print(f"  Việt: {repr(pair['viet_sentence'])}")
+                                    print(f"  Raw:  {repr(p_response_text)} -> Score parsed: {score}")
+                                
+                                aligned_pairs[idx]["qwen_score"] = score
+                                aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
+                            except RuntimeError as p_e:
+                                if "CUDA out of memory" in str(p_e):
+                                    print("[Qwen] Critical: CUDA Out of Memory even with batch_size=1! Skipping verification for this pair.")
+                                    torch.cuda.empty_cache()
+                                    aligned_pairs[idx]["qwen_score"] = 0
+                                    aligned_pairs[idx]["verified"] = False
+                                else:
+                                    raise p_e
+                    else:
+                        raise e
 
-            processed += len(batch_indices)
-            print(f"[Qwen] Processed {processed}/{total_uncertain} uncertain pairs...")
+                processed += len(batch_indices)
+                print(f"[Qwen] Processed {processed}/{total_uncertain} uncertain pairs...")
 
         # Summarize results
         kept = sum(1 for idx in uncertain_pairs_indices if aligned_pairs[idx]["verified"])

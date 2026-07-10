@@ -60,7 +60,59 @@ class QwenRealigner:
     # Model loading
     # ------------------------------------------------------------------ #
 
+    def _call_gemini(self, prompt: str, is_json: bool = False) -> str:
+        import requests
+        import os
+        import json
+        import time
+        
+        # Load API key
+        api_key = self.config.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "Gemini API key is missing. Please set GEMINI_API_KEY environment variable "
+                "or specify 'api_key' in config.py under qwen_verifier."
+            )
+            
+        model = self.model_name # e.g. "gemini-2.0-flash-lite"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": 0.0
+            }
+        }
+        if is_json:
+            payload["generationConfig"]["responseMimeType"] = "application/json"
+            
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                if response.status_code == 200:
+                    result = response.json()
+                    return result['candidates'][0]['content']['parts'][0]['text']
+                elif response.status_code == 429:
+                    # Rate limit hit (429) - wait with backoff
+                    sleep_time = (2 ** attempt) + 2
+                    print(f"[Gemini] Rate limit (429) hit. Retrying in {sleep_time}s...")
+                    time.sleep(sleep_time)
+                else:
+                    raise ValueError(f"Gemini API returned error {response.status_code}: {response.text}")
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise e
+                time.sleep(2)
+        raise ValueError("Failed to call Gemini API after max retries.")
+
     def _load_model(self):
+        if self.model_name.lower().startswith("gemini"):
+            return
+            
         if self._model is not None:
             return
 
@@ -384,13 +436,16 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
             return aligned_pairs
 
         print(f"[QwenRealign] Found {len(clusters)} NaN cluster(s) to re-align.")
-        self._load_model()
+        is_gemini = self.model_name.lower().startswith("gemini")
+        if not is_gemini:
+            self._load_model()
 
-        # Clear VRAM before starting realignments
-        import gc
-        import torch
-        gc.collect()
-        torch.cuda.empty_cache()
+        # Clear VRAM before starting realignments (only for local model)
+        if not is_gemini:
+            import gc
+            import torch
+            gc.collect()
+            torch.cuda.empty_cache()
 
         total_fixed = 0
         # Process clusters in reverse order so index replacement doesn't shift positions
@@ -403,7 +458,7 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                 if not h_is_nan:
                     cluster_han_indices.append(item.get("han_indices", []))
 
-            # Proportional slicing for large clusters to prevent VRAM OOM
+            # Proportional slicing for large clusters to prevent VRAM OOM (only for local model, Gemini can handle it directly but keep it for index preservation)
             sub_clusters = []
             if len(cluster_han) > 12 or len(cluster_viet) > 12:
                 n_han = len(cluster_han)
@@ -440,20 +495,71 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                 print(
                     f"[QwenRealign]   Processing sub-cluster with {len(sub_han)} Han, {len(sub_viet)} Viet..."
                 )
-                prompt = self._build_realign_prompt(sub_han, sub_viet)
-                inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
-                with torch.no_grad():
-                    output_tokens = self._model.generate(
-                        **inputs,
-                        max_new_tokens=512,
-                        do_sample=False,
-                        pad_token_id=self._tokenizer.eos_token_id,
-                    )
+                if is_gemini:
+                    num_han = len(sub_han)
+                    num_viet = len(sub_viet)
+                    han_numbered = "\n".join(f"  H{i+1}: {s}" for i, s in enumerate(sub_han))
+                    viet_numbered = "\n".join(f"  V{j+1}: {s}" for j, s in enumerate(sub_viet))
 
-                input_len = inputs.input_ids.shape[1]
-                response_text = self._tokenizer.decode(
-                    output_tokens[0][input_len:], skip_special_tokens=True
-                )
+                    if num_viet == 1:
+                        example_json = (
+                            f"[\n"
+                            f"  {{\"han\": \"H1+H2\", \"viet\": \"V1\"}},\n"
+                            f"  {{\"han\": \"H3\", \"viet\": null}}\n"
+                            f"]"
+                        )
+                    else:
+                        example_json = (
+                            f"[\n"
+                            f"  {{\"han\": \"H1\", \"viet\": \"V1\"}},\n"
+                            f"  {{\"han\": \"H2+H3\", \"viet\": \"V2\"}},\n"
+                            f"  {{\"han\": \"H4\", \"viet\": null}},\n"
+                            f"  {{\"han\": null, \"viet\": \"V{num_viet}\"}}\n"
+                            f"]"
+                        )
+
+                    system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam với kinh nghiệm sâu rộng về Đại Nam Nhất Thống Chí."
+                    user_content = f"""Dưới đây là các câu chữ Hán cổ và các câu dịch tiếng Việt tương ứng bị lệch pha (không được dóng hàng đúng chỗ).
+
+Nhiệm vụ của bạn: Dóng hàng lại các câu Hán và Việt dưới đây một cách CHÍNH XÁC NHẤT.
+
+QUY TẮC BẮT BUỘC:
+1. Chỉ được dùng các mã Hán từ H1 đến H{num_han} và các mã Việt từ V1 đến V{num_viet} (dựa theo danh sách CÁC CÂU HÁN và CÁC CÂU VIỆT bên dưới).
+2. TUYỆT ĐỐI KHÔNG sử dụng các mã câu không tồn tại trong danh sách (Ví dụ: nếu danh sách chỉ có V1 thì không được dùng V2, V3...).
+3. Mỗi cặp JSON phải có "han" (chứa mã tham chiếu câu Hán, ví dụ: "H1", hoặc nhiều câu gộp như "H1+H2") và "viet" (chứa mã tham chiếu câu Việt, ví dụ: "V1", hoặc nhiều câu gộp như "V1+V2").
+4. BẮT BUỘC dùng mã số thứ tự H1, H2... cho Hán và V1, V2... cho Việt. KHÔNG ĐƯỢC tự ý viết lại toàn bộ nội dung văn bản gốc vào JSON.
+5. Mỗi câu CHỈ được dùng một lần.
+6. Nếu một câu Hán không tìm được câu Việt phù hợp, đặt "viet": null.
+7. Nếu một câu Việt không tìm được câu Hán phù hợp, đặt "han": null.
+8. Trả lời ĐÚNG định dạng JSON, không giải thích thêm.
+
+CÁC CÂU HÁN:
+{han_numbered}
+
+CÁC CÂU VIỆT:
+{viet_numbered}
+
+Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
+{example_json}
+"""
+                    prompt = f"{system_content}\n\n{user_content}"
+                    response_text = self._call_gemini(prompt, is_json=True)
+                else:
+                    prompt = self._build_realign_prompt(sub_han, sub_viet)
+                    import torch
+                    inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+                    with torch.no_grad():
+                        output_tokens = self._model.generate(
+                            **inputs,
+                            max_new_tokens=512,
+                            do_sample=False,
+                            pad_token_id=self._tokenizer.eos_token_id,
+                        )
+
+                    input_len = inputs.input_ids.shape[1]
+                    response_text = self._tokenizer.decode(
+                        output_tokens[0][input_len:], skip_special_tokens=True
+                    )
 
                 new_pairs = self._parse_realign_response(response_text, sub_han, sub_viet, sub_han_indices)
                 if new_pairs is None:
@@ -465,6 +571,9 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                     )
                 
                 combined_new_pairs.extend(new_pairs)
+                if is_gemini:
+                    import time
+                    time.sleep(2.0)
 
             # Replace the cluster slice with the combined re-aligned and/or fallback pairs
             aligned_pairs[cluster_start:cluster_end] = combined_new_pairs

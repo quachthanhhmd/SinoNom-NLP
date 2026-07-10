@@ -70,6 +70,9 @@ class QwenRealigner:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self._tokenizer.padding_side = "left"
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
         model_kwargs = {"device_map": self.device_map, "torch_dtype": torch.float16}
 
         if self.load_in_4bit:

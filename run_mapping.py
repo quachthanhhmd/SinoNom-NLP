@@ -190,13 +190,44 @@ def process_alignment_group(
     print(f"Total Han sentences to align: {len(all_sino_sentences)}")
     print(f"Total Viet sentences to align (after cleaning): {len(viet_sentences)}")
     
-    # 3. Perform Alignment
-    raw_aligned = aligner.align(all_sino_sentences, viet_sentences)
+    # Cache setup
+    import json
+    group_key = os.path.splitext(os.path.basename(viet_file))[0]
+    cache_dir = os.path.join(exporter.output_dir, work_code, "_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    phase1_cache = os.path.join(cache_dir, f"{group_key}_phase1.json")
+    phase2_cache = os.path.join(cache_dir, f"{group_key}_phase2.json")
+    
+    raw_aligned = None
+    run_phase1 = True
+    run_phase2 = True
+    
+    # 3. Perform Alignment (or load from cache if available)
+    if realign_enabled and os.path.exists(phase2_cache):
+        print(f"[Cache] Found Phase 2 cached alignment at: {phase2_cache}")
+        print(f"[Cache] Loading cache to skip Phase 1 (SimAlign) and Phase 2 (Verification)...")
+        with open(phase2_cache, "r", encoding="utf-8") as f:
+            raw_aligned = json.load(f)
+        run_phase1 = False
+        run_phase2 = False
+    elif (qwen_enabled or realign_enabled) and os.path.exists(phase1_cache):
+        print(f"[Cache] Found Phase 1 cached alignment at: {phase1_cache}")
+        print(f"[Cache] Loading cache to skip Phase 1 computation (SimAlign)...")
+        with open(phase1_cache, "r", encoding="utf-8") as f:
+            raw_aligned = json.load(f)
+        run_phase1 = False
+        
+    if run_phase1 or raw_aligned is None:
+        raw_aligned = aligner.align(all_sino_sentences, viet_sentences)
+        # Save Phase 1 cache
+        with open(phase1_cache, "w", encoding="utf-8") as f:
+            json.dump(raw_aligned, f, ensure_ascii=False, indent=2)
+        print(f"[Cache] Saved Phase 1 alignment cache to: {phase1_cache}")
     
     # 3.5 Phase 2: Qwen LLM Verification
     from config import ENSEMBLE_CONFIG
     qwen_conf = ENSEMBLE_CONFIG.get("qwen_verifier", {})
-    if isinstance(aligner, EnsembleSentenceAligner) and qwen_enabled and qwen_conf.get("enabled", True):
+    if isinstance(aligner, EnsembleSentenceAligner) and qwen_enabled and qwen_conf.get("enabled", True) and run_phase2:
         from nlp.qwen_verifier import QwenVerifier
         verifier = QwenVerifier(qwen_conf)
         raw_aligned = verifier.verify(raw_aligned)
@@ -225,6 +256,11 @@ def process_alignment_group(
             else:
                 filtered_aligned.append(item)
         raw_aligned = filtered_aligned
+        
+        # Save Phase 2 cache
+        with open(phase2_cache, "w", encoding="utf-8") as f:
+            json.dump(raw_aligned, f, ensure_ascii=False, indent=2)
+        print(f"[Cache] Saved Phase 2 alignment cache to: {phase2_cache}")
 
     # 3.7 Phase 3: Qwen Local Re-Alignment of unresolved NaN clusters
     if realign_enabled and isinstance(aligner, EnsembleSentenceAligner):

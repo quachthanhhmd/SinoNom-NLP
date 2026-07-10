@@ -116,10 +116,12 @@ def process_alignment_group(
     qwen_enabled: bool = False,
     realign_enabled: bool = False
 ):
-    print(f"\n=======================================================")
-    print(f"Aligning Sino files: {[f[1] for f in sino_files]}")
-    print(f"With Viet file: {viet_file}")
-    print(f"=======================================================")
+    vols_str = ", ".join([f"Quyển {f[0]} ({os.path.basename(f[1])})" for f in sino_files])
+    print(f"\n=========================================================================")
+    print(f">>> BẮT ĐẦU XỬ LÝ NHÓM FILE:")
+    print(f"    - Hán Nôm: {vols_str}")
+    print(f"    - Tiếng Việt: {os.path.basename(viet_file)}")
+    print(f"=========================================================================")
     
     # 1. Read Sino sentences and track their source volumes
     all_sino_sentences = []

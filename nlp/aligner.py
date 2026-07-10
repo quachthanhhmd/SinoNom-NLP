@@ -364,6 +364,11 @@ class EnsembleSentenceAligner(Aligner):
         self.config = None
         # Track loaded scorer objects so we can free them from GPU before Phase 2
         self._loaded_scorers = []
+        # Cache scorer instances to avoid loading models repeatedly for each volume
+        self.labse_scorer = None
+        self.vecalign_scorer = None
+        self.bert_scorer = None
+        self.simalign_scorer = None
 
     def free_gpu_memory(self):
         """
@@ -395,6 +400,13 @@ class EnsembleSentenceAligner(Aligner):
                 print(f"[VRAM] Warning: could not free {type(scorer).__name__}: {e}")
 
         self._loaded_scorers.clear()
+        
+        # Reset scorer cache attributes
+        self.labse_scorer = None
+        self.vecalign_scorer = None
+        self.bert_scorer = None
+        self.simalign_scorer = None
+        
         gc.collect()
 
         try:
@@ -453,24 +465,26 @@ class EnsembleSentenceAligner(Aligner):
         
         if labse_conf.get("enabled", True) or vecalign_conf.get("enabled", True):
             labse_model_name = labse_conf.get("model_name", "sentence-transformers/LaBSE")
-            labse_scorer = LaBSEScorer(model_name=labse_model_name, device=self.device)
-            self._loaded_scorers.append(labse_scorer)
+            if self.labse_scorer is None:
+                self.labse_scorer = LaBSEScorer(model_name=labse_model_name, device=self.device)
+                self._loaded_scorers.append(self.labse_scorer)
             
             # Encode once and reuse
-            labse_han_norm = labse_scorer.encode(han_sentences, "Han (LaBSE)")
-            labse_viet_norm = labse_scorer.encode(viet_sentences, "Viet (LaBSE)")
+            labse_han_norm = self.labse_scorer.encode(han_sentences, "Han (LaBSE)")
+            labse_viet_norm = self.labse_scorer.encode(viet_sentences, "Viet (LaBSE)")
 
             if labse_conf.get("enabled", True):
-                score_matrices["labse"] = labse_scorer.score(
+                score_matrices["labse"] = self.labse_scorer.score(
                     han_sentences, viet_sentences, labse_han_norm, labse_viet_norm
                 )
                 active_weights["labse"] = labse_conf.get("weight", 0.20)
 
             if vecalign_conf.get("enabled", True):
                 window_size = vecalign_conf.get("window_size", 3)
-                vecalign_scorer = VecalignScorer(window_size=window_size)
-                self._loaded_scorers.append(vecalign_scorer)
-                score_matrices["vecalign"] = vecalign_scorer.score(
+                if self.vecalign_scorer is None:
+                    self.vecalign_scorer = VecalignScorer(window_size=window_size)
+                    self._loaded_scorers.append(self.vecalign_scorer)
+                score_matrices["vecalign"] = self.vecalign_scorer.score(
                     han_sentences, viet_sentences, labse_han_norm, labse_viet_norm
                 )
                 active_weights["vecalign"] = vecalign_conf.get("weight", 0.30)
@@ -480,11 +494,12 @@ class EnsembleSentenceAligner(Aligner):
         bert_han_norm, bert_viet_norm = None, None
         if bert_conf.get("enabled", True):
             bert_model_name = bert_conf.get("model_name", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-            bert_scorer = BERTAlignScorer(model_name=bert_model_name, device=self.device)
-            self._loaded_scorers.append(bert_scorer)
+            if self.bert_scorer is None:
+                self.bert_scorer = BERTAlignScorer(model_name=bert_model_name, device=self.device)
+                self._loaded_scorers.append(self.bert_scorer)
             # We encode and save embeddings for merged precomputations later
-            bert_han_norm = bert_scorer._encode_normalized(han_sentences, "Han (BERTAlign)")
-            bert_viet_norm = bert_scorer._encode_normalized(viet_sentences, "Viet (BERTAlign)")
+            bert_han_norm = self.bert_scorer._encode_normalized(han_sentences, "Han (BERTAlign)")
+            bert_viet_norm = self.bert_scorer._encode_normalized(viet_sentences, "Viet (BERTAlign)")
             
             # Use precomputed to avoid re-encoding
             score_matrices["bertalign"] = bert_han_norm @ bert_viet_norm.T
@@ -494,15 +509,16 @@ class EnsembleSentenceAligner(Aligner):
         simalign_conf = scorers_conf.get("simalign", {})
         simalign_matrix = None
         if simalign_conf.get("enabled", True):
-            simalign_scorer = SimAlignScorer(
-                model_name=simalign_conf.get("model", "xlmr"),
-                top_k=simalign_conf.get("top_k", 5)
-            )
-            self._loaded_scorers.append(simalign_scorer)
-            if simalign_scorer.is_available():
+            if self.simalign_scorer is None:
+                self.simalign_scorer = SimAlignScorer(
+                    model_name=simalign_conf.get("model", "xlmr"),
+                    top_k=simalign_conf.get("top_k", 5)
+                )
+                self._loaded_scorers.append(self.simalign_scorer)
+            if self.simalign_scorer.is_available():
                 # We need a reference matrix to filter top_k candidate pairs.
                 ref_matrix = score_matrices.get("labse", list(score_matrices.values())[0] if score_matrices else None)
-                simalign_matrix = simalign_scorer.score(han_sentences, viet_sentences, ref_matrix)
+                simalign_matrix = self.simalign_scorer.score(han_sentences, viet_sentences, ref_matrix)
                 score_matrices["simalign"] = simalign_matrix
                 active_weights["simalign"] = simalign_conf.get("weight", 0.25)
             else:

@@ -505,20 +505,21 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                 if not h_is_nan:
                     cluster_han_indices.append(item.get("han_indices", []))
 
-            # Proportional slicing for large clusters to prevent VRAM OOM (only for local model, Gemini has massive context)
+            # Proportional slicing for large clusters to prevent VRAM OOM (Qwen limit=12, Gemini safety limit=30 to maintain reasoning accuracy)
             sub_clusters = []
-            if not is_gemini and (len(cluster_han) > 12 or len(cluster_viet) > 12):
+            limit = 30 if is_gemini else 12
+            if len(cluster_han) > limit or len(cluster_viet) > limit:
                 n_han = len(cluster_han)
                 n_viet = len(cluster_viet)
                 max_len = max(n_han, n_viet)
-                num_chunks = (max_len + 11) // 12
+                num_chunks = (max_len + (limit - 1)) // limit
                 
                 h_step = max(1, int(n_han / num_chunks))
                 v_step = max(1, int(n_viet / num_chunks))
                 
                 print(
                     f"[QwenRealign] Cluster [{cluster_start}:{cluster_end}] is large "
-                    f"({n_han} Han, {n_viet} Viet). Slicing into {num_chunks} sub-cluster(s)..."
+                    f"({n_han} Han, {n_viet} Viet). Slicing into {num_chunks} sub-cluster(s) of max size {limit}..."
                 )
                 
                 for chunk_no in range(num_chunks):

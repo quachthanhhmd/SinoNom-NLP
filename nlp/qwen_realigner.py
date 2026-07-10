@@ -407,70 +407,30 @@ Kết quả dóng hàng (JSON array):
                     f"[QwenRealign]   Processing sub-cluster with {len(sub_han)} Han, {len(sub_viet)} Viet..."
                 )
                 prompt = self._build_realign_prompt(sub_han, sub_viet)
-                try:
-                    inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
-                    with torch.no_grad():
-                        output_tokens = self._model.generate(
-                            **inputs,
-                            max_new_tokens=min(50 * (len(sub_han) + len(sub_viet)), 1024),
-                            do_sample=False,
-                            pad_token_id=self._tokenizer.eos_token_id,
-                        )
-
-                    input_len = inputs.input_ids.shape[1]
-                    response_text = self._tokenizer.decode(
-                        output_tokens[0][input_len:], skip_special_tokens=True
+                inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+                with torch.no_grad():
+                    output_tokens = self._model.generate(
+                        **inputs,
+                        max_new_tokens=min(50 * (len(sub_han) + len(sub_viet)), 1024),
+                        do_sample=False,
+                        pad_token_id=self._tokenizer.eos_token_id,
                     )
 
-                    new_pairs = self._parse_realign_response(response_text, sub_han, sub_viet, sub_han_indices)
-                    if new_pairs is None:
-                        print("[QwenRealign]   Warning: Could not parse sub-cluster output. Keeping sub-cluster as NaNs.")
-                        # Fallback: keep this sub-cluster as NaNs
-                        new_pairs = []
-                        for idx, h in enumerate(sub_han):
-                            new_pairs.append({
-                                "han_sentence": h,
-                                "viet_sentence": "",
-                                "similarity_score": 0.0,
-                                "qwen_realigned": False,
-                                "han_indices": [sub_han_indices[idx]]
-                            })
-                        for v in sub_viet:
-                            new_pairs.append({
-                                "han_sentence": "",
-                                "viet_sentence": v,
-                                "similarity_score": 0.0,
-                                "qwen_realigned": False,
-                                "han_indices": []
-                            })
-                    
-                    combined_new_pairs.extend(new_pairs)
-                except RuntimeError as e:
-                    if "CUDA out of memory" in str(e):
-                        print(
-                            f"[QwenRealign]   Warning: CUDA Out of Memory while realigning sub-cluster. Keeping sub-cluster as NaNs."
-                        )
-                        torch.cuda.empty_cache()
-                        new_pairs = []
-                        for idx, h in enumerate(sub_han):
-                            new_pairs.append({
-                                "han_sentence": h,
-                                "viet_sentence": "",
-                                "similarity_score": 0.0,
-                                "qwen_realigned": False,
-                                "han_indices": [sub_han_indices[idx]]
-                            })
-                        for v in sub_viet:
-                            new_pairs.append({
-                                "han_sentence": "",
-                                "viet_sentence": v,
-                                "similarity_score": 0.0,
-                                "qwen_realigned": False,
-                                "han_indices": []
-                            })
-                        combined_new_pairs.extend(new_pairs)
-                    else:
-                        raise e
+                input_len = inputs.input_ids.shape[1]
+                response_text = self._tokenizer.decode(
+                    output_tokens[0][input_len:], skip_special_tokens=True
+                )
+
+                new_pairs = self._parse_realign_response(response_text, sub_han, sub_viet, sub_han_indices)
+                if new_pairs is None:
+                    raise ValueError(
+                        f"QwenRealign failed to parse LLM output for sub-cluster.\n"
+                        f"Han sentences: {sub_han}\n"
+                        f"Viet sentences: {sub_viet}\n"
+                        f"Raw Qwen response: {repr(response_text)}"
+                    )
+                
+                combined_new_pairs.extend(new_pairs)
 
             # Replace the cluster slice with the combined re-aligned and/or fallback pairs
             aligned_pairs[cluster_start:cluster_end] = combined_new_pairs

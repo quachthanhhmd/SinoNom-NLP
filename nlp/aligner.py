@@ -713,7 +713,8 @@ class EnsembleSentenceAligner(Aligner):
                 "pair_id": f"pair_{idx:06d}",
                 "han_sentence": han_txt,
                 "viet_sentence": viet_txt,
-                "similarity_score": round(float(sim), 4)
+                "similarity_score": round(float(sim), 4),
+                "han_indices": h_idxs
             })
             idx += 1
             

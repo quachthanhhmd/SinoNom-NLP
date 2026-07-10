@@ -204,6 +204,7 @@ Kết quả dóng hàng (JSON array):
         response_text: str,
         han_sentences: List[str],
         viet_sentences: List[str],
+        global_han_indices: List[int],
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Parse Qwen's JSON output and resolve H/V references to actual sentence text.
@@ -282,12 +283,23 @@ Kết quả dóng hàng (JSON array):
             han_text = self._resolve_text(han_val, han_sentences, "H")
             viet_text = self._resolve_text(viet_val, viet_sentences, "V")
 
+            # Resolve references to actual index list
+            resolved_indices = []
+            if han_val is not None:
+                val_str = str(han_val).strip()
+                refs = re.findall(r"H(\d+)", val_str, re.IGNORECASE)
+                for ref in refs:
+                    idx = int(ref) - 1
+                    if 0 <= idx < len(global_han_indices):
+                        resolved_indices.append(global_han_indices[idx])
+
             if han_text or viet_text:
                 results.append({
                     "han_sentence": han_text or "",
                     "viet_sentence": viet_text or "",
                     "similarity_score": 0.75 if (han_text and viet_text) else 0.0,
                     "qwen_realigned": True,
+                    "han_indices": resolved_indices
                 })
 
         return results if results else None
@@ -352,6 +364,11 @@ Kết quả dóng hàng (JSON array):
         total_fixed = 0
         # Process clusters in reverse order so index replacement doesn't shift positions
         for cluster_start, cluster_end, cluster_han, cluster_viet in reversed(clusters):
+            # Extract Han indices for the cluster
+            cluster_han_indices = []
+            for item in aligned_pairs[cluster_start:cluster_end]:
+                cluster_han_indices.extend(item.get("han_indices", []))
+
             # Proportional slicing for large clusters to prevent VRAM OOM
             sub_clusters = []
             if len(cluster_han) > 12 or len(cluster_viet) > 12:
@@ -377,14 +394,15 @@ Kết quả dóng hàng (JSON array):
                     
                     sub_clusters.append((
                         cluster_han[h_start:h_end],
-                        cluster_viet[v_start:v_end]
+                        cluster_viet[v_start:v_end],
+                        cluster_han_indices[h_start:h_end]
                     ))
             else:
-                sub_clusters.append((cluster_han, cluster_viet))
+                sub_clusters.append((cluster_han, cluster_viet, cluster_han_indices))
 
             combined_new_pairs = []
             
-            for sub_han, sub_viet in sub_clusters:
+            for sub_han, sub_viet, sub_han_indices in sub_clusters:
                 print(
                     f"[QwenRealign]   Processing sub-cluster with {len(sub_han)} Han, {len(sub_viet)} Viet..."
                 )
@@ -404,15 +422,27 @@ Kết quả dóng hàng (JSON array):
                         output_tokens[0][input_len:], skip_special_tokens=True
                     )
 
-                    new_pairs = self._parse_realign_response(response_text, sub_han, sub_viet)
+                    new_pairs = self._parse_realign_response(response_text, sub_han, sub_viet, sub_han_indices)
                     if new_pairs is None:
                         print("[QwenRealign]   Warning: Could not parse sub-cluster output. Keeping sub-cluster as NaNs.")
                         # Fallback: keep this sub-cluster as NaNs
                         new_pairs = []
-                        for h in sub_han:
-                            new_pairs.append({"han_sentence": h, "viet_sentence": "", "similarity_score": 0.0, "qwen_realigned": False})
+                        for idx, h in enumerate(sub_han):
+                            new_pairs.append({
+                                "han_sentence": h,
+                                "viet_sentence": "",
+                                "similarity_score": 0.0,
+                                "qwen_realigned": False,
+                                "han_indices": [sub_han_indices[idx]]
+                            })
                         for v in sub_viet:
-                            new_pairs.append({"han_sentence": "", "viet_sentence": v, "similarity_score": 0.0, "qwen_realigned": False})
+                            new_pairs.append({
+                                "han_sentence": "",
+                                "viet_sentence": v,
+                                "similarity_score": 0.0,
+                                "qwen_realigned": False,
+                                "han_indices": []
+                            })
                     
                     combined_new_pairs.extend(new_pairs)
                 except RuntimeError as e:
@@ -422,10 +452,22 @@ Kết quả dóng hàng (JSON array):
                         )
                         torch.cuda.empty_cache()
                         new_pairs = []
-                        for h in sub_han:
-                            new_pairs.append({"han_sentence": h, "viet_sentence": "", "similarity_score": 0.0, "qwen_realigned": False})
+                        for idx, h in enumerate(sub_han):
+                            new_pairs.append({
+                                "han_sentence": h,
+                                "viet_sentence": "",
+                                "similarity_score": 0.0,
+                                "qwen_realigned": False,
+                                "han_indices": [sub_han_indices[idx]]
+                            })
                         for v in sub_viet:
-                            new_pairs.append({"han_sentence": "", "viet_sentence": v, "similarity_score": 0.0, "qwen_realigned": False})
+                            new_pairs.append({
+                                "han_sentence": "",
+                                "viet_sentence": v,
+                                "similarity_score": 0.0,
+                                "qwen_realigned": False,
+                                "han_indices": []
+                            })
                         combined_new_pairs.extend(new_pairs)
                     else:
                         raise e

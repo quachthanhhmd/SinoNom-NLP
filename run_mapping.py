@@ -212,13 +212,15 @@ def process_alignment_group(
                     filtered_aligned.append({
                         "han_sentence": item["han_sentence"],
                         "viet_sentence": "",
-                        "similarity_score": 0.0
+                        "similarity_score": 0.0,
+                        "han_indices": item.get("han_indices", [])
                     })
                 if item["viet_sentence"]:
                     filtered_aligned.append({
                         "han_sentence": "",
                         "viet_sentence": item["viet_sentence"],
-                        "similarity_score": 0.0
+                        "similarity_score": 0.0,
+                        "han_indices": []
                     })
             else:
                 filtered_aligned.append(item)
@@ -257,42 +259,25 @@ def process_alignment_group(
     # To keep code clean, let's do text matching. Since Hán sentences are mostly unique in a book, 
     # we can search for the first Hán sentence in the aligned block to identify its volume.
     
-    # Reconstruct the volume mapping using a sequential pointer to handle duplicate/short sentences safely
+    # Reconstruct the volume mapping using explicit Han index tracking (robust to out-of-order outputs)
     current_vol = sino_source_map[0]
-    sino_idx = 0
     
     for item in raw_aligned:
         han_txt = item["han_sentence"]
-        if not han_txt:
+        h_idxs = item.get("han_indices", [])
+        
+        if not han_txt or not h_idxs:
             # If Hán is empty (Viet-only sentence), we assign it to the last active volume
             vol = current_vol
         else:
-            if sino_idx >= len(all_sino_sentences):
+            first_idx = h_idxs[0]
+            if not (0 <= first_idx < len(sino_source_map)):
                 raise ValueError(
-                    f"Pointer out of bounds while mapping Han sentence. "
-                    f"Current pointer: {sino_idx}, Total Sino sentences: {len(all_sino_sentences)}. "
+                    f"Han index {first_idx} is out of bounds in sino_source_map (length {len(sino_source_map)}). "
                     f"Offending sentence: {repr(han_txt)}"
                 )
-                
-            # The volume of this aligned pair is determined by the first Han sentence in the block
-            vol = sino_source_map[sino_idx]
+            vol = sino_source_map[first_idx]
             current_vol = vol
-            
-            # Consume the Han sentences that are merged into this aligned block
-            matched_any = False
-            while sino_idx < len(all_sino_sentences):
-                orig_sent = all_sino_sentences[sino_idx]
-                if orig_sent in han_txt:
-                    sino_idx += 1
-                    matched_any = True
-                else:
-                    break
-                    
-            if not matched_any:
-                raise ValueError(
-                    f"Sequential pointer mismatch: could not find the expected original sentence "
-                    f"at index {sino_idx} ({repr(all_sino_sentences[sino_idx])}) inside the aligned text: {repr(han_txt)}"
-                )
                 
         if vol not in volume_aligned_data:
             volume_aligned_data[vol] = []

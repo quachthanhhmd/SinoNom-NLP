@@ -238,7 +238,7 @@ def process_alignment_group(
     if isinstance(aligner, EnsembleSentenceAligner) and qwen_enabled and qwen_conf.get("enabled", True) and run_phase2:
         from nlp.qwen_verifier import QwenVerifier
         verifier = QwenVerifier(qwen_conf)
-        raw_aligned = verifier.verify(raw_aligned)
+        raw_aligned = verifier.verify(raw_aligned, cache_path=phase2_cache)
         
         # Split rejected pairs (verified == False) into unaligned sentences to avoid false matches
         filtered_aligned = []

@@ -218,13 +218,16 @@ Câu Việt: {viet}
     # Public API
     # ------------------------------------------------------------------ #
 
-    def verify(self, aligned_pairs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def verify(
+        self, aligned_pairs: List[Dict[str, Any]], cache_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         Verify aligned pairs. Filter out candidates based on Qwen's score.
 
         Args:
             aligned_pairs: List of dicts representing aligned pairs. Each must contain:
                            "han_sentence", "viet_sentence", "similarity_score"
+            cache_path:    Optional path to save intermediate/final Phase 2 JSON output.
 
         Returns:
             List of dicts with additional keys:
@@ -234,9 +237,37 @@ Câu Việt: {viet}
         if not aligned_pairs:
             return []
 
-        # Find pairs that need verification (score in the uncertain range)
+        # Check if cache_path exists and load it to resume progress
+        import os
+        import json
+        if cache_path and os.path.exists(cache_path):
+            print(f"[Cache] Found Phase 2 checkpoint/cached verification at: {cache_path}")
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cached_data = json.load(f)
+                if cached_data:
+                    # Map cached verification status back to aligned_pairs
+                    cache_map = {}
+                    for item in cached_data:
+                        k = (item.get("han_sentence", ""), item.get("viet_sentence", ""))
+                        if item.get("qwen_score") is not None:
+                            cache_map[k] = (item["qwen_score"], item["verified"])
+                    
+                    mapped_count = 0
+                    for pair in aligned_pairs:
+                        k = (pair.get("han_sentence", ""), pair.get("viet_sentence", ""))
+                        if k in cache_map:
+                            pair["qwen_score"], pair["verified"] = cache_map[k]
+                            mapped_count += 1
+                    print(f"[Cache] Successfully loaded Phase 2 checkpoint. Resumed {mapped_count} pairs.")
+            except Exception as e:
+                print(f"[Cache] Warning: Failed to load Phase 2 checkpoint: {e}")
+
+        # Find pairs that need verification (score in the uncertain range and not yet verified)
         uncertain_pairs_indices = []
         for idx, pair in enumerate(aligned_pairs):
+            if pair.get("qwen_score") is not None:
+                continue
             score = pair.get("similarity_score", 0.0)
             # Only verify if both sentences are non-empty
             if not pair.get("han_sentence", "").strip() or not pair.get("viet_sentence", "").strip():
@@ -250,10 +281,12 @@ Câu Việt: {viet}
             f"in uncertainty band [{self.uncertain_low}, {self.uncertain_high}]."
         )
 
-        # Initialize all as verified (default) and qwen_score as None (skipped)
+        # Initialize all as verified (default) and qwen_score as None (skipped) only if not set
         for pair in aligned_pairs:
-            pair["qwen_score"] = None
-            pair["verified"] = True
+            if "qwen_score" not in pair:
+                pair["qwen_score"] = None
+            if "verified" not in pair:
+                pair["verified"] = True
 
         if total_uncertain == 0:
             print("[Qwen] No pairs need LLM verification. Skipping Qwen Phase 2.")
@@ -300,6 +333,15 @@ Câu Việt: {pair["viet_sentence"]}
 
                 aligned_pairs[idx]["qwen_score"] = score
                 aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
+                
+                # Save progress to checkpoint
+                if cache_path:
+                    try:
+                        with open(cache_path, "w", encoding="utf-8") as f:
+                            json.dump(aligned_pairs, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        pass
+
                 processed += 1
                 if processed < total_uncertain:
                     time.sleep(2.0)
@@ -346,6 +388,14 @@ Câu Việt: {pair["viet_sentence"]}
                         aligned_pairs[idx]["qwen_score"] = score
                         aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
 
+                    # Save progress to checkpoint
+                    if cache_path:
+                        try:
+                            with open(cache_path, "w", encoding="utf-8") as f:
+                                json.dump(aligned_pairs, f, ensure_ascii=False, indent=2)
+                        except Exception as e:
+                            pass
+
                 except RuntimeError as e:
                     if "CUDA out of memory" in str(e):
                         print(f"[Qwen] Warning: CUDA Out of Memory with batch_size={len(prompts)}. Falling back to sequential execution (batch_size=1) for this batch...")
@@ -379,6 +429,14 @@ Câu Việt: {pair["viet_sentence"]}
                                 
                                 aligned_pairs[idx]["qwen_score"] = score
                                 aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
+                                
+                                # Save progress to checkpoint
+                                if cache_path:
+                                    try:
+                                        with open(cache_path, "w", encoding="utf-8") as f:
+                                            json.dump(aligned_pairs, f, ensure_ascii=False, indent=2)
+                                    except Exception as e:
+                                        pass
                             except RuntimeError as p_e:
                                 if "CUDA out of memory" in str(p_e):
                                     print("[Qwen] Critical: CUDA Out of Memory even with batch_size=1! Skipping verification for this pair.")

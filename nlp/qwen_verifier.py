@@ -458,3 +458,30 @@ Câu Việt: {pair["viet_sentence"]}
         )
 
         return aligned_pairs
+
+    def free_gpu_memory(self):
+        """Giải phóng mô hình Qwen khỏi VRAM để tránh CUDA OOM cho các quyển sau."""
+        import gc
+        print("[Qwen] Releasing verifier model from GPU VRAM...")
+        if self._model is not None:
+            try:
+                self._model.cpu()
+            except Exception:
+                pass
+            del self._model
+            self._model = None
+            
+        if self._tokenizer is not None:
+            del self._tokenizer
+            self._tokenizer = None
+            
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                print(f"[Qwen] GPU memory after cleanup: {allocated:.2f}GB")
+        except ImportError:
+            pass

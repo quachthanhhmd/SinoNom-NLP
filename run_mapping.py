@@ -279,6 +279,10 @@ def process_alignment_group(
         with open(phase2_cache, "w", encoding="utf-8") as f:
             json.dump(raw_aligned, f, ensure_ascii=False, indent=2)
         print(f"[Cache] Saved Phase 2 alignment cache to: {phase2_cache}")
+        
+        # Giải phóng VRAM của Qwen sau khi hoàn tất Phase 2 để quyển sau chạy tiếp Phase 1 không bị OOM
+        print("[VRAM] Releasing Qwen verifier from GPU VRAM after Phase 2 completion...")
+        verifier.free_gpu_memory()
 
     # 3.7 Phase 3: Qwen Local Re-Alignment of unresolved NaN clusters
     if realign_enabled and isinstance(aligner, EnsembleSentenceAligner):

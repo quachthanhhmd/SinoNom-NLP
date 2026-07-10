@@ -75,26 +75,62 @@ class CorpusExporter:
         df.to_excel(path, index=False)
         print(f"Exported parallel Excel to {path}")
 
-    def export_hierarchical(self, parent_dir: str, chapter_str: str, aligned_data: List[Dict[str, str]]):
+    def export_hierarchical(self, parent_dir: str, chapter_str: str, aligned_data: List[Dict[str, str]],
+                            han_raw_text: str = None):
         """
-        Exports parallel TSV and Excel files into a hierarchical directory structure:
-        output_dir / parent_dir / parent_dir_chapter / parent_dir_chapter_parallel.tsv
-        Example: output / HVB_001 / HVB_001_01 / HVB_001_01_parallel.tsv
+        Exports two versions of parallel files into a hierarchical directory structure:
+
+        output_dir / parent_dir / parent_dir_chapter /
+            ├── parent_dir_chapter_parallel.tsv       ← Chuẩn yêu cầu: 3 cột, đã lọc NaN
+            ├── parent_dir_chapter_parallel.xlsx      ← Chuẩn yêu cầu: 3 cột, đã lọc NaN
+            ├── parent_dir_chapter_parallel_full.tsv  ← Nội bộ: 4 cột, giữ nguyên NaN
+            └── parent_dir_chapter_raw.txt            ← Văn bản Hán thô (nếu có)
+
+        Example:
+            output / HVB_001 / HVB_001_01 / HVB_001_01_parallel.tsv
         """
         target_dir = os.path.join(self.output_dir, parent_dir, f"{parent_dir}_{chapter_str}")
         os.makedirs(target_dir, exist_ok=True)
-        
-        tsv_path = os.path.join(target_dir, f"{parent_dir}_{chapter_str}_parallel.tsv")
-        xlsx_path = os.path.join(target_dir, f"{parent_dir}_{chapter_str}_parallel.xlsx")
-        
-        df = pd.DataFrame(aligned_data)
-        if not df.empty:
-            df["viet_sentence"] = df["viet_sentence"].apply(clean_vietnamese_text)
-            df = df[["pair_id", "han_sentence", "viet_sentence", "similarity_score"]]
+
+        file_prefix = f"{parent_dir}_{chapter_str}"
+
+        df_full = pd.DataFrame(aligned_data)
+        if not df_full.empty:
+            df_full["viet_sentence"] = df_full["viet_sentence"].apply(clean_vietnamese_text)
+            df_full = df_full[["pair_id", "han_sentence", "viet_sentence", "similarity_score"]]
         else:
-            df = pd.DataFrame(columns=["pair_id", "han_sentence", "viet_sentence", "similarity_score"])
-            
-        df.to_csv(tsv_path, sep="\t", index=False, encoding="utf-8")
-        df.to_excel(xlsx_path, index=False)
+            df_full = pd.DataFrame(columns=["pair_id", "han_sentence", "viet_sentence", "similarity_score"])
+
+        # ── Phiên bản đầy đủ nội bộ (4 cột, giữ nguyên các dòng NaN) ──────────
+        full_tsv_path = os.path.join(target_dir, f"{file_prefix}_parallel_full.tsv")
+        df_full.to_csv(full_tsv_path, sep="\t", index=False, encoding="utf-8")
+
+        # ── Phiên bản chuẩn yêu cầu (3 cột, lọc bỏ dòng NaN) ─────────────────
+        # Chỉ giữ các dòng có cả Hán lẫn Việt hợp lệ
+        def _is_valid(val):
+            if val is None:
+                return False
+            s = str(val).strip()
+            return bool(s) and s.lower() != "nan"
+
+        mask = df_full["han_sentence"].apply(_is_valid) & df_full["viet_sentence"].apply(_is_valid)
+        df_clean = df_full[mask][["pair_id", "han_sentence", "viet_sentence"]].reset_index(drop=True)
+
+        clean_tsv_path = os.path.join(target_dir, f"{file_prefix}_parallel.tsv")
+        clean_xlsx_path = os.path.join(target_dir, f"{file_prefix}_parallel.xlsx")
+        df_clean.to_csv(clean_tsv_path, sep="\t", index=False, encoding="utf-8")
+        df_clean.to_excel(clean_xlsx_path, index=False)
+
+        # ── Raw Hán text (nếu được cung cấp) ─────────────────────────────────
+        if han_raw_text is not None:
+            raw_path = os.path.join(target_dir, f"{file_prefix}_raw.txt")
+            with open(raw_path, "w", encoding="utf-8") as f:
+                f.write(han_raw_text)
+            print(f"  Exported raw text: {raw_path}")
+
+        n_full = len(df_full)
+        n_clean = len(df_clean)
         print(f"Exported hierarchical outputs to: {target_dir}")
+        print(f"  _parallel.tsv (chuẩn yêu cầu): {n_clean} cặp sạch / {n_full} tổng dòng")
+        print(f"  _parallel_full.tsv (nội bộ):    {n_full} dòng (bao gồm NaN)")
 

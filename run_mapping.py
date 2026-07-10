@@ -124,6 +124,7 @@ def process_alignment_group(
     # 1. Read Sino sentences and track their source volumes
     all_sino_sentences = []
     sino_source_map = [] # tracks which index in all_sino_sentences belongs to which volume code
+    vol_raw_text = {}    # vol_code -> raw Han text string (for _raw.txt export)
     
     for vol_code, sino_path in sino_files:
         if not os.path.exists(sino_path):
@@ -137,6 +138,7 @@ def process_alignment_group(
         is_quyen1 = (str(vol_code) == "01" or str(vol_code) == "1")
         skip_preface = is_quyen1
         
+        vol_sents_raw = []
         for _, row in df_sino.iterrows():
             sent = str(row['sentence']).strip()
             if sent:
@@ -150,6 +152,8 @@ def process_alignment_group(
                 for p in parts:
                     all_sino_sentences.append(p)
                     sino_source_map.append(vol_code)
+                    vol_sents_raw.append(p)
+        vol_raw_text[vol_code] = "\n".join(vol_sents_raw)
                 
     if not all_sino_sentences:
         raise ValueError(f"No Sino sentences found for work {work_code}.")
@@ -348,7 +352,8 @@ def process_alignment_group(
         exporter.export_hierarchical(
             parent_dir=work_code,
             chapter_str=vol_code,
-            aligned_data=formatted_aligned
+            aligned_data=formatted_aligned,
+            han_raw_text=vol_raw_text.get(vol_code)
         )
         
         # In báo cáo sơ bộ cho từng volume

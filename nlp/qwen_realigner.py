@@ -56,7 +56,6 @@ class QwenRealigner:
         self._model = model
         self._tokenizer = tokenizer
 
-    # ------------------------------------------------------------------ #
     # Model loading
     # ------------------------------------------------------------------ #
 
@@ -66,48 +65,78 @@ class QwenRealigner:
         import json
         import time
         
-        # Load API key
-        api_key = self.config.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
-        if not api_key:
+        # Load API keys
+        raw_key = self.config.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
+        if not raw_key:
             raise ValueError(
                 "Gemini API key is missing. Please set GEMINI_API_KEY environment variable "
                 "or specify 'api_key' in config.py under qwen_verifier."
             )
             
-        model = self.model_name # e.g. "gemini-2.0-flash-lite"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        
-        headers = {'Content-Type': 'application/json'}
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }],
-            "generationConfig": {
-                "temperature": 0.0
-            }
-        }
-        if is_json:
-            payload["generationConfig"]["responseMimeType"] = "application/json"
+        if isinstance(raw_key, list):
+            keys = raw_key
+        else:
+            keys = [k.strip() for k in raw_key.split(",") if k.strip()]
             
-        max_retries = 5
+        if not keys:
+            raise ValueError("No valid Gemini API keys found.")
+            
+        if not hasattr(self, "_current_key_idx") or self._current_key_idx >= len(keys):
+            self._current_key_idx = 0
+            
+        model = self.model_name
+        max_retries = len(keys) * 2
+        
         for attempt in range(max_retries):
+            api_key = keys[self._current_key_idx]
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            
+            headers = {'Content-Type': 'application/json'}
+            payload = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.0
+                }
+            }
+            if is_json:
+                payload["generationConfig"]["responseMimeType"] = "application/json"
+                
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=30)
                 if response.status_code == 200:
                     result = response.json()
                     return result['candidates'][0]['content']['parts'][0]['text']
                 elif response.status_code == 429:
-                    # Rate limit hit (429) - wait with backoff
-                    sleep_time = (2 ** attempt) + 2
-                    print(f"[Gemini] Rate limit (429) hit. Retrying in {sleep_time}s...")
-                    time.sleep(sleep_time)
+                    if len(keys) > 1:
+                        old_idx = self._current_key_idx
+                        self._current_key_idx = (self._current_key_idx + 1) % len(keys)
+                        print(f"[Gemini] Key #{old_idx+1} rate-limited or exhausted (429). Rotating to Key #{self._current_key_idx+1}...")
+                        time.sleep(1.0)
+                    else:
+                        sleep_time = (2 ** attempt) + 2
+                        print(f"[Gemini] Rate limit (429) hit. Retrying in {sleep_time}s...")
+                        time.sleep(sleep_time)
                 else:
-                    raise ValueError(f"Gemini API returned error {response.status_code}: {response.text}")
+                    if len(keys) > 1:
+                        old_idx = self._current_key_idx
+                        self._current_key_idx = (self._current_key_idx + 1) % len(keys)
+                        print(f"[Gemini] Key #{old_idx+1} returned error {response.status_code}. Rotating to Key #{self._current_key_idx+1}...")
+                        time.sleep(1.0)
+                    else:
+                        raise ValueError(f"Gemini API returned error {response.status_code}: {response.text}")
             except Exception as e:
-                if attempt == max_retries - 1:
-                    raise e
-                time.sleep(2)
-        raise ValueError("Failed to call Gemini API after max retries.")
+                if len(keys) > 1:
+                    old_idx = self._current_key_idx
+                    self._current_key_idx = (self._current_key_idx + 1) % len(keys)
+                    print(f"[Gemini] Exception with Key #{old_idx+1}: {e}. Rotating to Key #{self._current_key_idx+1}...")
+                    time.sleep(1.0)
+                else:
+                    if attempt == max_retries - 1:
+                        raise e
+                    time.sleep(2)
+        raise ValueError("Failed to call Gemini API after rotating all keys.")
 
     def _load_model(self):
         if self.model_name.lower().startswith("gemini"):

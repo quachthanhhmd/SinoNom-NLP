@@ -362,6 +362,52 @@ class EnsembleSentenceAligner(Aligner):
         self.device = device
         # Load config lazily inside align
         self.config = None
+        # Track loaded scorer objects so we can free them from GPU before Phase 2
+        self._loaded_scorers = []
+
+    def free_gpu_memory(self):
+        """
+        Giải phóng tất cả model scorer khỏi GPU/RAM để nhường VRAM cho Phase 2 (Qwen).
+        Phải được gọi sau khi align() hoàn thành và trước khi nạp Qwen.
+        """
+        import gc
+        freed = []
+        for scorer in self._loaded_scorers:
+            try:
+                # Sentence-transformers models
+                if hasattr(scorer, '_model') and scorer._model is not None:
+                    try:
+                        scorer._model.cpu()
+                    except Exception:
+                        pass
+                    del scorer._model
+                    scorer._model = None
+                # Handle sentence_transformers SentenceTransformer
+                if hasattr(scorer, 'model') and scorer.model is not None:
+                    try:
+                        scorer.model.cpu()
+                    except Exception:
+                        pass
+                    del scorer.model
+                    scorer.model = None
+                freed.append(type(scorer).__name__)
+            except Exception as e:
+                print(f"[VRAM] Warning: could not free {type(scorer).__name__}: {e}")
+
+        self._loaded_scorers.clear()
+        gc.collect()
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                reserved  = torch.cuda.memory_reserved()  / 1024**3
+                print(f"[VRAM] Freed scorers: {freed}")
+                print(f"[VRAM] GPU memory after cleanup: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
+        except ImportError:
+            pass
 
     def align(self, han_sentences: List[str], viet_sentences: List[str]) -> List[Dict[str, str]]:
         if not han_sentences or not viet_sentences:
@@ -408,6 +454,7 @@ class EnsembleSentenceAligner(Aligner):
         if labse_conf.get("enabled", True) or vecalign_conf.get("enabled", True):
             labse_model_name = labse_conf.get("model_name", "sentence-transformers/LaBSE")
             labse_scorer = LaBSEScorer(model_name=labse_model_name, device=self.device)
+            self._loaded_scorers.append(labse_scorer)
             
             # Encode once and reuse
             labse_han_norm = labse_scorer.encode(han_sentences, "Han (LaBSE)")
@@ -422,6 +469,7 @@ class EnsembleSentenceAligner(Aligner):
             if vecalign_conf.get("enabled", True):
                 window_size = vecalign_conf.get("window_size", 3)
                 vecalign_scorer = VecalignScorer(window_size=window_size)
+                self._loaded_scorers.append(vecalign_scorer)
                 score_matrices["vecalign"] = vecalign_scorer.score(
                     han_sentences, viet_sentences, labse_han_norm, labse_viet_norm
                 )
@@ -433,6 +481,7 @@ class EnsembleSentenceAligner(Aligner):
         if bert_conf.get("enabled", True):
             bert_model_name = bert_conf.get("model_name", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
             bert_scorer = BERTAlignScorer(model_name=bert_model_name, device=self.device)
+            self._loaded_scorers.append(bert_scorer)
             # We encode and save embeddings for merged precomputations later
             bert_han_norm = bert_scorer._encode_normalized(han_sentences, "Han (BERTAlign)")
             bert_viet_norm = bert_scorer._encode_normalized(viet_sentences, "Viet (BERTAlign)")
@@ -449,6 +498,7 @@ class EnsembleSentenceAligner(Aligner):
                 model_name=simalign_conf.get("model", "xlmr"),
                 top_k=simalign_conf.get("top_k", 5)
             )
+            self._loaded_scorers.append(simalign_scorer)
             if simalign_scorer.is_available():
                 # We need a reference matrix to filter top_k candidate pairs.
                 ref_matrix = score_matrices.get("labse", list(score_matrices.values())[0] if score_matrices else None)

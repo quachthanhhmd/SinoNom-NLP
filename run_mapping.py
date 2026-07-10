@@ -240,6 +240,10 @@ def process_alignment_group(
     from config import ENSEMBLE_CONFIG
     qwen_conf = ENSEMBLE_CONFIG.get("qwen_verifier", {})
     if isinstance(aligner, EnsembleSentenceAligner) and qwen_enabled and qwen_conf.get("enabled", True) and run_phase2:
+        # Giải phóng VRAM từ Phase 1 (LaBSE, BERTAlign, SimAlign) TRƯỚC khi nạp Qwen 7B
+        print("[VRAM] Releasing Phase 1 scorer models from GPU before loading Qwen...")
+        aligner.free_gpu_memory()
+
         from nlp.qwen_verifier import QwenVerifier
         verifier = QwenVerifier(qwen_conf)
         raw_aligned = verifier.verify(raw_aligned, cache_path=phase2_cache)

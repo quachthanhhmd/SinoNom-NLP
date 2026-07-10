@@ -260,6 +260,20 @@ def process_alignment_group(
             chapter_str=vol_code,
             aligned_data=formatted_aligned
         )
+        
+        # In báo cáo sơ bộ cho từng volume
+        total_pairs = len(formatted_aligned)
+        valid_matches = sum(1 for item in formatted_aligned if item["han_sentence"] and item["viet_sentence"])
+        nan_han = sum(1 for item in formatted_aligned if not item["han_sentence"] and item["viet_sentence"])
+        nan_viet = sum(1 for item in formatted_aligned if item["han_sentence"] and not item["viet_sentence"])
+        match_rate = (valid_matches / total_pairs * 100) if total_pairs > 0 else 0
+        print(f"=======================================================")
+        print(f"[Báo cáo sơ bộ Volume {vol_code}]:")
+        print(f"  - Tổng số cặp xuất bản: {total_pairs}")
+        print(f"  - Khớp song song (Hán - Việt): {valid_matches} ({match_rate:.2f}%)")
+        print(f"  - Khuyết chữ Hán (Chỉ có Việt): {nan_han}")
+        print(f"  - Khuyết tiếng Việt (Chỉ có Hán): {nan_viet}")
+        print(f"=======================================================")
 def main():
     parser = argparse.ArgumentParser(description="Hán-Việt Sentence Alignment Orchestrator")
     parser.add_argument("--sino_dir", type=str, default="dataset/MAPPING/sino_extract", help="Sino extract directory")
@@ -289,18 +303,18 @@ def main():
         # Quyển 1
         ([("01", "q1_sentences.csv")], "q01.csv"),
         
-        # Quyển 2, 3, 4 -> mapped to the filtered quyen2 file
+        # Quyển 2, 3, 4 -> mapped to the combined q2_3_4 file
         ([
             ("02", "q2_sentences.csv"),
             ("03", "q3_sentences.csv"),
             ("04", "q4_sentences.csv")
-         ], "q2_3_4_quyen2.csv"),
+         ], "q2_3_4.csv"),
         
         # Quyển 5
         ([("05", "q5_sentences.csv")], "q05.csv"),
         
-        # Quyển 6 -> mapped to the filtered quyen8 file
-        ([("06", "q6_sentences.csv")], "q6_quyen8.csv"),
+        # Quyển 6 -> mapped to q6.csv
+        ([("06", "q6_sentences.csv")], "q6.csv"),
         
         # Quyển 7, 8
         ([

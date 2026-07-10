@@ -257,30 +257,42 @@ def process_alignment_group(
     # To keep code clean, let's do text matching. Since Hán sentences are mostly unique in a book, 
     # we can search for the first Hán sentence in the aligned block to identify its volume.
     
-    # Let's write a helper to match a Han sentence string back to its index in all_sino_sentences.
-    # Because sentences in the aligned block might be merged (e.g. "Sent1 Sent2"), we find the first sentence.
-    current_vol = sino_source_map[0] # Default fallback
+    # Reconstruct the volume mapping using a sequential pointer to handle duplicate/short sentences safely
+    current_vol = sino_source_map[0]
+    sino_idx = 0
     
-    # We will split the aligned data by matching the Hán sentences
     for item in raw_aligned:
         han_txt = item["han_sentence"]
         if not han_txt:
             # If Hán is empty (Viet-only sentence), we assign it to the last active volume
             vol = current_vol
         else:
-            # Find which volume this Han sentence belongs to
-            # To handle merged sentences, we split and match
-            first_sentence_part = han_txt.split("。")[0] + "。"
-            matched_vol = None
-            for idx, orig_sent in enumerate(all_sino_sentences):
-                if first_sentence_part in orig_sent or orig_sent in han_txt:
-                    matched_vol = sino_source_map[idx]
+            if sino_idx >= len(all_sino_sentences):
+                raise ValueError(
+                    f"Pointer out of bounds while mapping Han sentence. "
+                    f"Current pointer: {sino_idx}, Total Sino sentences: {len(all_sino_sentences)}. "
+                    f"Offending sentence: {repr(han_txt)}"
+                )
+                
+            # The volume of this aligned pair is determined by the first Han sentence in the block
+            vol = sino_source_map[sino_idx]
+            current_vol = vol
+            
+            # Consume the Han sentences that are merged into this aligned block
+            matched_any = False
+            while sino_idx < len(all_sino_sentences):
+                orig_sent = all_sino_sentences[sino_idx]
+                if orig_sent in han_txt:
+                    sino_idx += 1
+                    matched_any = True
+                else:
                     break
-            if matched_vol:
-                vol = matched_vol
-                current_vol = matched_vol
-            else:
-                raise ValueError(f"Could not trace Han sentence back to its original volume: {repr(han_txt)}")
+                    
+            if not matched_any:
+                raise ValueError(
+                    f"Sequential pointer mismatch: could not find the expected original sentence "
+                    f"at index {sino_idx} ({repr(all_sino_sentences[sino_idx])}) inside the aligned text: {repr(han_txt)}"
+                )
                 
         if vol not in volume_aligned_data:
             volume_aligned_data[vol] = []

@@ -349,64 +349,90 @@ Kết quả dóng hàng (JSON array):
         total_fixed = 0
         # Process clusters in reverse order so index replacement doesn't shift positions
         for cluster_start, cluster_end, cluster_han, cluster_viet in reversed(clusters):
-            # Check cluster size to prevent CUDA OOM and bad quality alignments
-            if len(cluster_han) > 15 or len(cluster_viet) > 15:
+            # Proportional slicing for large clusters to prevent VRAM OOM
+            sub_clusters = []
+            if len(cluster_han) > 12 or len(cluster_viet) > 12:
+                n_han = len(cluster_han)
+                n_viet = len(cluster_viet)
+                max_len = max(n_han, n_viet)
+                num_chunks = (max_len + 11) // 12
+                
+                h_step = max(1, int(n_han / num_chunks))
+                v_step = max(1, int(n_viet / num_chunks))
+                
                 print(
-                    f"[QwenRealign] Warning: Cluster [{cluster_start}:{cluster_end}] is too large "
-                    f"({len(cluster_han)} Han, {len(cluster_viet)} Viet) to be aligned safely by LLM. Skipping."
+                    f"[QwenRealign] Cluster [{cluster_start}:{cluster_end}] is large "
+                    f"({n_han} Han, {n_viet} Viet). Slicing into {num_chunks} sub-cluster(s)..."
                 )
-                continue
+                
+                for chunk_no in range(num_chunks):
+                    h_start = chunk_no * h_step
+                    h_end = h_start + h_step if chunk_no < num_chunks - 1 else n_han
+                    
+                    v_start = chunk_no * v_step
+                    v_end = v_start + v_step if chunk_no < num_chunks - 1 else n_viet
+                    
+                    sub_clusters.append((
+                        cluster_han[h_start:h_end],
+                        cluster_viet[v_start:v_end]
+                    ))
+            else:
+                sub_clusters.append((cluster_han, cluster_viet))
 
-            print(
-                f"[QwenRealign] Processing cluster [{cluster_start}:{cluster_end}] "
-                f"({len(cluster_han)} Han, {len(cluster_viet)} Viet)..."
-            )
+            combined_new_pairs = []
+            
+            for sub_han, sub_viet in sub_clusters:
+                print(
+                    f"[QwenRealign]   Processing sub-cluster with {len(sub_han)} Han, {len(sub_viet)} Viet..."
+                )
+                prompt = self._build_realign_prompt(sub_han, sub_viet)
+                try:
+                    inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+                    with torch.no_grad():
+                        output_tokens = self._model.generate(
+                            **inputs,
+                            max_new_tokens=min(50 * (len(sub_han) + len(sub_viet)), 1024),
+                            do_sample=False,
+                            pad_token_id=self._tokenizer.eos_token_id,
+                        )
 
-            prompt = self._build_realign_prompt(cluster_han, cluster_viet)
-
-            import torch
-            try:
-                inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
-                with torch.no_grad():
-                    output_tokens = self._model.generate(
-                        **inputs,
-                        # Allow enough tokens for a JSON response. 50 tokens per pair typically.
-                        max_new_tokens=min(50 * (len(cluster_han) + len(cluster_viet)), 1024),
-                        do_sample=False,
-                        pad_token_id=self._tokenizer.eos_token_id,
+                    input_len = inputs.input_ids.shape[1]
+                    response_text = self._tokenizer.decode(
+                        output_tokens[0][input_len:], skip_special_tokens=True
                     )
 
-                input_len = inputs.input_ids.shape[1]
-                response_text = self._tokenizer.decode(
-                    output_tokens[0][input_len:], skip_special_tokens=True
-                )
+                    new_pairs = self._parse_realign_response(response_text, sub_han, sub_viet)
+                    if new_pairs is None:
+                        print("[QwenRealign]   Warning: Could not parse sub-cluster output. Keeping sub-cluster as NaNs.")
+                        # Fallback: keep this sub-cluster as NaNs
+                        new_pairs = []
+                        for h in sub_han:
+                            new_pairs.append({"han_sentence": h, "viet_sentence": "", "similarity_score": 0.0, "qwen_realigned": False})
+                        for v in sub_viet:
+                            new_pairs.append({"han_sentence": "", "viet_sentence": v, "similarity_score": 0.0, "qwen_realigned": False})
+                    
+                    combined_new_pairs.extend(new_pairs)
+                except RuntimeError as e:
+                    if "CUDA out of memory" in str(e):
+                        print(
+                            f"[QwenRealign]   Warning: CUDA Out of Memory while realigning sub-cluster. Keeping sub-cluster as NaNs."
+                        )
+                        torch.cuda.empty_cache()
+                        new_pairs = []
+                        for h in sub_han:
+                            new_pairs.append({"han_sentence": h, "viet_sentence": "", "similarity_score": 0.0, "qwen_realigned": False})
+                        for v in sub_viet:
+                            new_pairs.append({"han_sentence": "", "viet_sentence": v, "similarity_score": 0.0, "qwen_realigned": False})
+                        combined_new_pairs.extend(new_pairs)
+                    else:
+                        raise e
 
-                print(f"[QwenRealign] Response received ({len(response_text)} chars).")
-                new_pairs = self._parse_realign_response(response_text, cluster_han, cluster_viet)
-            except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    print(
-                        f"[QwenRealign] Warning: CUDA Out of Memory while realigning cluster "
-                        f"[{cluster_start}:{cluster_end}]. Skipping this cluster."
-                    )
-                    torch.cuda.empty_cache()
-                    new_pairs = None
-                else:
-                    raise e
-
-            if new_pairs is None:
-                print(
-                    f"[QwenRealign] Warning: Could not parse Qwen output for cluster "
-                    f"[{cluster_start}:{cluster_end}]. Keeping NaN entries as-is."
-                )
-                continue
-
-            # Replace the cluster slice with Qwen's re-aligned pairs
-            aligned_pairs[cluster_start:cluster_end] = new_pairs
+            # Replace the cluster slice with the combined re-aligned and/or fallback pairs
+            aligned_pairs[cluster_start:cluster_end] = combined_new_pairs
             total_fixed += 1
             print(
                 f"[QwenRealign] Cluster [{cluster_start}:{cluster_end}] replaced with "
-                f"{len(new_pairs)} re-aligned pair(s)."
+                f"{len(combined_new_pairs)} pair(s)."
             )
 
         print(

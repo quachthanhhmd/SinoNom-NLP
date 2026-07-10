@@ -31,7 +31,7 @@ def load_sino_csv(file_path: str) -> pd.DataFrame:
                 continue
             parts = line.split(sep, 1)
             if len(parts) < 2:
-                continue
+                raise ValueError(f"Malformed line in Sino CSV '{file_path}': expected at least 2 fields separated by '{sep}', got: {repr(line)}")
             sent_id = parts[0].strip()
             rest = parts[1].strip()
             
@@ -127,13 +127,11 @@ def process_alignment_group(
     
     for vol_code, sino_path in sino_files:
         if not os.path.exists(sino_path):
-            print(f"[Error] Sino file not found: {sino_path}")
-            continue
+            raise FileNotFoundError(f"Sino file not found: {sino_path}")
         df_sino = load_sino_csv(sino_path)
         # Ensure column 'sentence' exists
         if 'sentence' not in df_sino.columns:
-            print(f"[Error] Column 'sentence' missing in {sino_path}")
-            continue
+            raise KeyError(f"Column 'sentence' missing in {sino_path}")
             
         # Special filter for Volume 1: skip preface/tấu biểu before '大南一統志卷之一'
         is_quyen1 = (str(vol_code) == "01" or str(vol_code) == "1")
@@ -154,18 +152,15 @@ def process_alignment_group(
                     sino_source_map.append(vol_code)
                 
     if not all_sino_sentences:
-        print("[Warning] No Sino sentences found. Skipping group.")
-        return
+        raise ValueError(f"No Sino sentences found for work {work_code}.")
         
     # 2. Read and filter Vietnamese sentences
     if not os.path.exists(viet_file):
-        print(f"[Error] Viet file not found: {viet_file}")
-        return
+        raise FileNotFoundError(f"Viet file not found: {viet_file}")
         
     df_viet = pd.read_csv(viet_file)
     if 'sentence' not in df_viet.columns:
-        print(f"[Error] Column 'sentence' missing in {viet_file}")
-        return
+        raise KeyError(f"Column 'sentence' missing in {viet_file}")
         
     viet_sentences = []
     for _, row in df_viet.iterrows():
@@ -175,8 +170,7 @@ def process_alignment_group(
             viet_sentences.append(cleaned_sent)
             
     if not viet_sentences:
-        print("[Warning] No valid Vietnamese sentences found after cleaning. Skipping group.")
-        return
+        raise ValueError(f"No valid Vietnamese sentences found after cleaning in {viet_file}.")
         
     print(f"Total Han sentences to align: {len(all_sino_sentences)}")
     print(f"Total Viet sentences to align (after cleaning): {len(viet_sentences)}")
@@ -271,7 +265,7 @@ def process_alignment_group(
                 vol = matched_vol
                 current_vol = matched_vol
             else:
-                vol = current_vol
+                raise ValueError(f"Could not trace Han sentence back to its original volume: {repr(han_txt)}")
                 
         if vol not in volume_aligned_data:
             volume_aligned_data[vol] = []
@@ -430,8 +424,7 @@ def main():
                     if match:
                         vol_num = f"{int(match.group(1)):02d}"
                     else:
-                        # Fallback based on filename
-                        vol_num = "10" if "10" in fname else "16"
+                        raise ValueError(f"Unexpected ID format in merged volume file {fname}: {repr(sent_id)}")
                         
                     if vol_num not in vol_sentences:
                         vol_sentences[vol_num] = []

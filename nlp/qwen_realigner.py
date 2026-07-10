@@ -291,7 +291,7 @@ Kết quả dóng hàng (JSON array):
                 for ref in refs:
                     idx = int(ref) - 1
                     if 0 <= idx < len(global_han_indices):
-                        resolved_indices.append(global_han_indices[idx])
+                        resolved_indices.extend(global_han_indices[idx])
 
             if han_text or viet_text:
                 results.append({
@@ -364,10 +364,13 @@ Kết quả dóng hàng (JSON array):
         total_fixed = 0
         # Process clusters in reverse order so index replacement doesn't shift positions
         for cluster_start, cluster_end, cluster_han, cluster_viet in reversed(clusters):
-            # Extract Han indices for the cluster
+            # Extract Han indices for the cluster (preserving 1-to-1 mapping even for merged sentences)
             cluster_han_indices = []
             for item in aligned_pairs[cluster_start:cluster_end]:
-                cluster_han_indices.extend(item.get("han_indices", []))
+                h = str(item.get("han_sentence", "") or "").strip()
+                h_is_nan = not h or h.lower() == "nan"
+                if not h_is_nan:
+                    cluster_han_indices.append(item.get("han_indices", []))
 
             # Proportional slicing for large clusters to prevent VRAM OOM
             sub_clusters = []

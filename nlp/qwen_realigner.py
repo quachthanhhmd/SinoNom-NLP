@@ -214,36 +214,55 @@ Kết quả dóng hàng (JSON array):
         elif "```" in clean_text:
             clean_text = clean_text.split("```")[-1].split("```")[0].strip()
 
-        # Find first '[' and last ']'
-        start_idx = clean_text.find('[')
+        # Find the actual JSON array start (matching '[' followed by space/braces)
+        match_start = re.search(r'\[\s*\{', clean_text)
+        if not match_start:
+            return None
+        start_idx = match_start.start()
+        
+        # Find matching closing bracket ']'
         end_idx = clean_text.rfind(']')
-        if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
+        if end_idx == -1 or end_idx < start_idx:
             return None
         
         json_str = clean_text[start_idx : end_idx + 1]
 
-        # Basic JSON cleanup for trailing commas
+        # Basic JSON cleanup
         json_str = re.sub(r',\s*\}', '}', json_str)
         json_str = re.sub(r',\s*\]', ']', json_str)
 
         raw_pairs = None
         try:
+            # Standard JSON load
             raw_pairs = json.loads(json_str)
         except json.JSONDecodeError:
-            # Fallback regex parser for common variations: {"han": "H1", "viet": "V1"}
-            # Handles double quotes, single quotes, and nulls
-            dict_matches = re.findall(r'\{\s*"han"\s*:\s*([^,}\n]+)\s*,\s*"viet"\s*:\s*([^}\n]+)\s*\}', json_str)
-            if not dict_matches:
-                dict_matches = re.findall(r"\{\s*'han'\s*:\s*([^,}\n]+)\s*,\s*'viet'\s*:\s*([^}\n]+)\s*\}", json_str)
+            # Robust fallback parser for single/double quotes, formatting, and key order
+            cleaned = re.sub(r"'\s*han\s*'", '"han"', json_str)
+            cleaned = re.sub(r"'\s*viet\s*'", '"viet"', cleaned)
+            cleaned = re.sub(r"'\s*(H\d+|V\d+|null)\s*'", lambda m: '"' + m.group(1) + '"' if m.group(1) != 'null' else 'null', cleaned)
             
-            if dict_matches:
-                raw_pairs = []
-                for h_ref, v_ref in dict_matches:
-                    h_ref = h_ref.strip().strip('"').strip("'")
-                    v_ref = v_ref.strip().strip('"').strip("'")
-                    if h_ref.lower() == 'null': h_ref = None
-                    if v_ref.lower() == 'null': v_ref = None
-                    raw_pairs.append({"han": h_ref, "viet": v_ref})
+            try:
+                raw_pairs = json.loads(cleaned)
+            except json.JSONDecodeError:
+                # Direct dictionary block extractor (bulletproof regex fallback)
+                dict_blocks = re.findall(r'\{[^{}]+\}', cleaned)
+                if dict_blocks:
+                    raw_pairs = []
+                    for block in dict_blocks:
+                        han_m = re.search(r'"han"\s*:\s*([^,}\s\n]+)', block)
+                        if not han_m:
+                            han_m = re.search(r"'han'\s*:\s*([^,}\s\n]+)", block)
+                        
+                        viet_m = re.search(r'"viet"\s*:\s*([^,}\s\n]+)', block)
+                        if not viet_m:
+                            viet_m = re.search(r"'viet'\s*:\s*([^,}\s\n]+)", block)
+                            
+                        if han_m or viet_m:
+                            h_val = han_m.group(1).strip().strip('"').strip("'") if han_m else None
+                            v_val = viet_m.group(1).strip().strip('"').strip("'") if viet_m else None
+                            if h_val and h_val.lower() == 'null': h_val = None
+                            if v_val and v_val.lower() == 'null': v_val = None
+                            raw_pairs.append({"han": h_val, "viet": v_val})
 
         if not raw_pairs or not isinstance(raw_pairs, list):
             return None
@@ -330,6 +349,14 @@ Kết quả dóng hàng (JSON array):
         total_fixed = 0
         # Process clusters in reverse order so index replacement doesn't shift positions
         for cluster_start, cluster_end, cluster_han, cluster_viet in reversed(clusters):
+            # Check cluster size to prevent CUDA OOM and bad quality alignments
+            if len(cluster_han) > 15 or len(cluster_viet) > 15:
+                print(
+                    f"[QwenRealign] Warning: Cluster [{cluster_start}:{cluster_end}] is too large "
+                    f"({len(cluster_han)} Han, {len(cluster_viet)} Viet) to be aligned safely by LLM. Skipping."
+                )
+                continue
+
             print(
                 f"[QwenRealign] Processing cluster [{cluster_start}:{cluster_end}] "
                 f"({len(cluster_han)} Han, {len(cluster_viet)} Viet)..."

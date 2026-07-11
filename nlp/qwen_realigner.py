@@ -84,12 +84,28 @@ class QwenRealigner:
             self._current_key_idx = 0
             
         model = self.model_name
-        max_retries = len(keys) * 2
+        # Tăng số lượt thử lên gấp 5 lần số keys để có nhiều vòng xoay hơn
+        max_retries = len(keys) * 5
+        
+        # Lưu các key bị lỗi 403 vĩnh viễn để tránh lặp lại vô ích
+        bad_keys = set()
         
         for attempt in range(max_retries):
+            # Nếu tất cả các keys đều hỏng (403), dừng ngay lập tức
+            if len(bad_keys) >= len(keys):
+                raise ValueError("Tất cả các Gemini API Keys của bạn đều bị lỗi 403 (Forbidden). Vui lòng kiểm tra lại Kaggle Secrets.")
+                
             api_key = keys[self._current_key_idx]
+            if api_key in bad_keys:
+                self._current_key_idx = (self._current_key_idx + 1) % len(keys)
+                continue
+                
+            # Cứ mỗi lần xoay hết một vòng toàn bộ các key, cho hệ thống nghỉ 15 giây để hồi lại quota 429
+            if attempt > 0 and attempt % len(keys) == 0:
+                print(f"[Gemini] Đã thử qua một vòng tất cả các key. Tạm dừng 15 giây để hồi lại hạn mức (quota)...")
+                time.sleep(15.0)
+                
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            
             headers = {'Content-Type': 'application/json'}
             payload = {
                 "contents": [{
@@ -108,34 +124,27 @@ class QwenRealigner:
                     result = response.json()
                     return result['candidates'][0]['content']['parts'][0]['text']
                 elif response.status_code == 429:
-                    if len(keys) > 1:
-                        old_idx = self._current_key_idx
-                        self._current_key_idx = (self._current_key_idx + 1) % len(keys)
-                        print(f"[Gemini] Key #{old_idx+1} rate-limited or exhausted (429). Rotating to Key #{self._current_key_idx+1}...")
-                        time.sleep(1.0)
-                    else:
-                        sleep_time = (2 ** attempt) + 2
-                        print(f"[Gemini] Rate limit (429) hit. Retrying in {sleep_time}s...")
-                        time.sleep(sleep_time)
-                else:
-                    if len(keys) > 1:
-                        old_idx = self._current_key_idx
-                        self._current_key_idx = (self._current_key_idx + 1) % len(keys)
-                        print(f"[Gemini] Key #{old_idx+1} returned error {response.status_code}. Rotating to Key #{self._current_key_idx+1}...")
-                        time.sleep(1.0)
-                    else:
-                        raise ValueError(f"Gemini API returned error {response.status_code}: {response.text}")
-            except Exception as e:
-                if len(keys) > 1:
                     old_idx = self._current_key_idx
                     self._current_key_idx = (self._current_key_idx + 1) % len(keys)
-                    print(f"[Gemini] Exception with Key #{old_idx+1}: {e}. Rotating to Key #{self._current_key_idx+1}...")
+                    print(f"[Gemini] Key #{old_idx+1} bị hết hạn mức hoặc rate limit (429). Đang chuyển sang Key #{self._current_key_idx+1}...")
                     time.sleep(1.0)
+                elif response.status_code == 403:
+                    old_idx = self._current_key_idx
+                    bad_keys.add(api_key)
+                    self._current_key_idx = (self._current_key_idx + 1) % len(keys)
+                    print(f"[Gemini] ⚠️ Lỗi 403 (Forbidden) với Key #{old_idx+1}. Key này không hợp lệ hoặc sai định dạng. Đã loại bỏ key này khỏi vòng xoay.")
                 else:
-                    if attempt == max_retries - 1:
-                        raise e
-                    time.sleep(2)
-        raise ValueError("Failed to call Gemini API after rotating all keys.")
+                    old_idx = self._current_key_idx
+                    self._current_key_idx = (self._current_key_idx + 1) % len(keys)
+                    print(f"[Gemini] Key #{old_idx+1} trả về lỗi HTTP {response.status_code}. Đang xoay sang Key #{self._current_key_idx+1}...")
+                    time.sleep(1.0)
+            except Exception as e:
+                old_idx = self._current_key_idx
+                self._current_key_idx = (self._current_key_idx + 1) % len(keys)
+                print(f"[Gemini] Lỗi kết nối với Key #{old_idx+1}: {e}. Đang xoay sang Key #{self._current_key_idx+1}...")
+                time.sleep(1.0)
+                
+        raise ValueError("Không thể gọi Gemini API sau khi đã thử tất cả các key và áp dụng thời gian chờ (rate limit).")
 
     def _load_model(self):
         if self.model_name.lower().startswith("gemini"):

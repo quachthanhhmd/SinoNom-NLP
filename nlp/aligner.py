@@ -545,8 +545,8 @@ class EnsembleSentenceAligner(Aligner):
         padded_viet_bert = np.vstack([np.zeros((1, D_bert)), np.cumsum(bert_viet_norm, axis=0)]) if bert_viet_norm is not None else None
 
         # Vecalign overlap embeddings
-        vecalign_han_norm = vecalign_scorer._overlap_embeddings(labse_han_norm) if "vecalign" in score_matrices else None
-        vecalign_viet_norm = vecalign_scorer._overlap_embeddings(labse_viet_norm) if "vecalign" in score_matrices else None
+        vecalign_han_norm = self.vecalign_scorer._overlap_embeddings(labse_han_norm) if "vecalign" in score_matrices else None
+        vecalign_viet_norm = self.vecalign_scorer._overlap_embeddings(labse_viet_norm) if "vecalign" in score_matrices else None
         padded_han_vecalign = np.vstack([np.zeros((1, D_labse)), np.cumsum(vecalign_han_norm, axis=0)]) if vecalign_han_norm is not None else None
         padded_viet_vecalign = np.vstack([np.zeros((1, D_labse)), np.cumsum(vecalign_viet_norm, axis=0)]) if vecalign_viet_norm is not None else None
 

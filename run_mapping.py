@@ -19,43 +19,49 @@ def detect_separator(file_path: str) -> str:
     return ','
 
 def load_sino_csv(file_path: str) -> pd.DataFrame:
-    """Robustly parses Sino CSVs with unquoted commas in sentence values."""
+    """Robustly parses Sino CSVs with unquoted commas and multiline fields using python's csv module."""
+    import csv
     sep = detect_separator(file_path)
     ids = []
     sentences = []
+    
     with open(file_path, 'r', encoding='utf-8') as f:
-        header = f.readline().strip()
-        for line in f:
-            line = line.strip()
-            if not line:
+        reader = csv.reader(f, delimiter=sep, doublequote=True, skipinitialspace=True)
+        try:
+            # Skip header
+            header = next(reader)
+        except StopIteration:
+            return pd.DataFrame({"ID": [], "sentence": []})
+            
+        for row in reader:
+            if not row:
                 continue
-            parts = line.split(sep, 1)
-            if len(parts) < 2:
-                raise ValueError(f"Malformed line in Sino CSV '{file_path}': expected at least 2 fields separated by '{sep}', got: {repr(line)}")
-            sent_id = parts[0].strip()
-            rest = parts[1].strip()
+            sent_id = row[0].strip()
             
-            # Find the start of reference_Id
-            match_idx = -1
-            for pattern in [sep + '"[', sep + '[', sep + '[]', sep + '"[]"']:
-                idx = rest.rfind(pattern)
-                if idx > match_idx:
-                    match_idx = idx
-            if match_idx != -1:
-                sentence = rest[:match_idx]
-            else:
-                idx = rest.rfind(sep)
-                if idx != -1:
-                    sentence = rest[:idx]
+            # Reconstruct sentence when containing unquoted commas
+            if len(row) >= 2:
+                ref_candidate = row[-1].strip()
+                # Check if last element looks like a reference_Id array e.g. [], [1, 2]
+                if (ref_candidate.startswith('[') and ref_candidate.endswith(']')) or ref_candidate == '[]' or ref_candidate.startswith('"['):
+                    sentence = sep.join(row[1:-1])
                 else:
-                    sentence = rest
-            
-            sentence = sentence.strip()
+                    sentence = sep.join(row[1:])
+            else:
+                sentence = ""
+                
+            # Clean up newlines and quotes within the sentence
+            sentence = sentence.replace('\r', '').replace('\n', ' ').strip()
             if sentence.startswith('"') and sentence.endswith('"'):
                 sentence = sentence[1:-1].strip()
             sentence = sentence.replace('""', '"')
+            
+            # Skip empty entries
+            if not sent_id and not sentence:
+                continue
+                
             ids.append(sent_id)
             sentences.append(sentence)
+            
     return pd.DataFrame({"ID": ids, "sentence": sentences})
 
 def clean_vietnamese_sentence(sentence: str) -> bool:

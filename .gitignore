@@ -40,3 +40,9 @@ inference/
 *.pdmodel
 *.pdiparams
 *.pdiparams.info
+
+# Ignore heavy output files, keep only cache json files
+output/HVB_001/HVB_001_*/
+output/HVB_001/*.xlsx
+output/HVB_001/*.tsv
+output/HVB_001/*.txt

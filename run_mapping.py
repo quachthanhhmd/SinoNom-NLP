@@ -216,23 +216,23 @@ def process_alignment_group(
     run_phase2 = True
     
     # 3. Perform Alignment (or load from cache if available)
-    if realign_enabled and os.path.exists(phase3_cache):
+    if os.path.exists(phase3_cache):
         print(f"[Cache] Found Phase 3 cached/checkpoint alignment at: {phase3_cache}")
-        print(f"[Cache] Loading cache to resume or skip Phase 1 and 2...")
+        print(f"[Cache] Loading cache to skip Phase 1, 2, and 3 computation...")
         with open(phase3_cache, "r", encoding="utf-8") as f:
             raw_aligned = json.load(f)
         run_phase1 = False
         run_phase2 = False
-    elif realign_enabled and os.path.exists(phase2_cache):
+    elif os.path.exists(phase2_cache):
         print(f"[Cache] Found Phase 2 cached alignment at: {phase2_cache}")
-        print(f"[Cache] Loading cache to skip Phase 1 (SimAlign) and Phase 2 (Verification)...")
+        print(f"[Cache] Loading cache to skip Phase 1 and Phase 2 computation...")
         with open(phase2_cache, "r", encoding="utf-8") as f:
             raw_aligned = json.load(f)
         run_phase1 = False
         run_phase2 = False
-    elif (qwen_enabled or realign_enabled) and os.path.exists(phase1_cache):
+    elif os.path.exists(phase1_cache):
         print(f"[Cache] Found Phase 1 cached alignment at: {phase1_cache}")
-        print(f"[Cache] Loading cache to skip Phase 1 computation (SimAlign)...")
+        print(f"[Cache] Loading cache to skip Phase 1 computation...")
         with open(phase1_cache, "r", encoding="utf-8") as f:
             raw_aligned = json.load(f)
         run_phase1 = False

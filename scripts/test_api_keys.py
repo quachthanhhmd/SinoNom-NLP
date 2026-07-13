@@ -13,7 +13,15 @@ def test_keys():
     print(f"🔎 Tìm thấy {len(keys)} API Key(s) trong cấu hình. Bắt đầu kiểm tra nhanh...")
     print("=" * 80)
 
-    model = "gemini-1.5-flash"
+    # Đọc model name từ cấu hình của hệ thống hoặc dùng mặc định
+    model = "gemini-3.1-flash-lite"
+    try:
+        from config import ENSEMBLE_CONFIG
+        if "qwen_verifier" in ENSEMBLE_CONFIG:
+            model = ENSEMBLE_CONFIG["qwen_verifier"].get("realigner_model_name", "gemini-3.1-flash-lite")
+    except Exception:
+        pass
+
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{"parts": [{"text": "Hi"}]}],

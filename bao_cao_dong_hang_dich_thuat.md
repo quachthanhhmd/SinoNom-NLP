@@ -25,7 +25,24 @@ Mục tiêu cốt lõi của đồ án này là xây dựng một **hệ thống
 ## 2. DỮ LIỆU VÀ CÔNG CỤ SỬ DỤNG
 
 ### 2.1. Mô tả dữ liệu đầu vào và Nguồn dữ liệu
-Dữ liệu đầu vào gồm 17 tập tin CSV tương ứng với 17 quyển của bộ sách *Đại Nam Nhất Thống Chí*, bao gồm hai cột văn bản thô song song:
+Dữ liệu đầu vào gồm 17 tập tin CSV tương ứng với 17 quyển của bộ sách *Đại Nam Nhất Thống Chí*. Dưới đây là thống kê chi tiết số dòng thô ban đầu của từng Quyển (hoặc cụm Quyển ghép) được nạp vào hệ thống:
+
+| Nhóm Quyển | Tệp tin Chữ Hán | Tệp tin Tiếng Việt | Số dòng Chữ Hán thô | Số dòng Tiếng Việt thô (sau cleaning sơ bộ) |
+|---|---|---|---|---|
+| **Quyển 1** | `q1_sentences.csv` | `q01.csv` | 1,508 | 738 |
+| **Quyển 2 - 4** | `q2_sentences.csv`, `q3_sentences.csv`, `q4_sentences.csv` | `q2_3_4.csv` | 5,446 | 4,367 |
+| **Quyển 5** | `q5_sentences.csv` | `q05.csv` | 1,782 | 1,248 |
+| **Quyển 6** | `q6_sentences.csv` | `q6.csv` | 882 | 720 |
+| **Quyển 7 - 8** | `q7_sentences.csv`, `q8_sentences.csv` | `q07_08.csv` | 2,635 | 1,621 |
+| **Quyển 9** | `q9_sentences.csv` | `q09.csv` | 928 | 603 |
+| **Quyển 10 - 11** | `q10_11_sentences.csv` | `q10_11.csv` | 1,030 | 1,007 |
+| **Quyển 12** | `q12_sentences.csv` | `q12.csv` | 866 | 922 |
+| **Quyển 13** | `q13_sentences.csv` | `q13.csv` | 1,630 | 1,368 |
+| **Quyển 14 - 15** | `q14_sentences.csv`, `q15_sentences.csv` | `q14_15.csv` | 1,899 | 2,123 |
+| **Quyển 16 - 17** | `q16_17_sentences.csv` | `q16_17.csv` | 3,079 | 3,591 |
+| **TỔNG CỘNG** | | | **21,685** | **18,308** |
+
+*Đặc điểm dữ liệu thô*:
 1.  **Cột chữ Hán (Sino-Nom)**: Được số hóa bằng công nghệ OCR từ bản gốc chữ Hán cổ. Do đó, dữ liệu chứa một tỷ lệ nhiễu nhất định (ký tự bị nhận diện sai hoặc mất nét).
 2.  **Cột tiếng Việt dịch nghĩa (Quốc ngữ)**: Do các dịch giả nổi tiếng biên dịch. Đặc thù của cột này là chứa rất nhiều thơ phiên âm Hán-Việt kẹp giữa phần dịch nghĩa và các chú thích chú giải từ vựng đặt trong dấu ngoặc đơn `(...)` hoặc ngoặc vuông `[...]`.
 
@@ -93,13 +110,32 @@ Mặc dù dữ liệu sau Phase 3 đã dóng hàng đúng dòng, câu tiếng Vi
 
 ## 4. KẾT QUẢ ĐẠT ĐƯỢC
 
-### 4.1. Khối lượng dữ liệu xử lý
-Hệ thống đã xử lý toàn bộ 17 quyển của bộ địa chí *Đại Nam Nhất Thống Chí*.
-*   **Tổng số cặp câu thu được sau 3 Phase dóng hàng**: 6,259 cặp câu.
-*   **Chia tập dữ liệu**: Tập huấn luyện (Train): 5,633 câu; Tập đánh giá (Val): 626 câu.
-*   **Sau khi chạy bộ lọc làm sạch dữ liệu tự động**:
-    *   **Tập Train sạch**: **5,461** cặp câu (loại bỏ 172 câu nhiễu, tỷ lệ lọc ~3.05%).
-    *   **Tập Val sạch**: **610** cặp câu (loại bỏ 16 câu nhiễu, tỷ lệ lọc ~2.55%).
+### 4.1. Khối lượng dữ liệu xử lý và Phân tích sự hao hụt
+Dưới đây là sơ đồ dòng chảy định lượng dữ liệu (Data Flow) minh họa quá trình hao hụt và làm sạch từ dữ liệu thô sang dữ liệu huấn luyện cuối cùng:
+
+```
+[Dữ liệu Thô Ban đầu] 
+  - Hán thô: 21,685 dòng
+  - Việt thô: 18,308 dòng
+       │
+       ▼ (Giai đoạn I: Quy hoạch động gộp câu & Lọc câu rác)
+[Kết quả sau 3 Phase dóng hàng]
+  - Tổng số cặp câu thành phẩm: 6,259 cặp câu
+       │
+       ▼ (Giai đoạn II: Chia tập dữ liệu)
+  - Tập Train thô: 5,633 cặp câu
+  - Tập Val thô: 626 cặp câu
+       │
+       ▼ (Bộ lọc Regex làm sạch chú thích & Lọc tỷ lệ độ dài Length Ratio)
+[Dữ liệu huấn luyện cuối cùng]
+  - Tập Train siêu sạch: 5,461 cặp câu (Loại bỏ 172 câu nhiễu ~3.05%)
+  - Tập Val siêu sạch: 610 cặp câu (Loại bỏ 16 câu nhiễu ~2.55%)
+```
+
+**Phân tích nguyên nhân hao hụt dữ liệu**:
+1.  **Cơ chế gộp câu (Merging)**: Do đặc thù sách cổ chữ Hán thô bị ngắt dòng rất vụn (mỗi mục nhỏ hoặc số liệu được viết trên một dòng rất ngắn), trong khi bản dịch tiếng Việt lại được dịch giả gom lại thành một câu văn xuôi dài trọn vẹn. Thuật toán Quy hoạch động đã tự động gộp nhiều câu Hán thô (tối đa 15 câu) vào một dòng tiếng Việt tương ứng để đảm bảo tính trọn nghĩa. Đây là nguyên nhân lớn nhất khiến số lượng dòng Hán thô giảm từ 21,685 xuống còn 6,259 cặp câu thành phẩm.
+2.  **Lọc bỏ câu rác & mục lục**: Các dòng chữ Hán rác (như ký hiệu quét lỗi OCR, tiêu đề trang, mục lục thô) không tìm thấy câu dịch tương ứng bên tiếng Việt sẽ bị thuật toán dóng hàng tự động bỏ qua để tránh gây nhiễu.
+3.  **Lọc bỏ các cặp câu lệch tỷ lệ độ dài (Length Ratio Filter)**: Ở giai đoạn tiền xử lý trước khi train, bộ lọc loại bỏ 188 câu bị lệch dòng thô (ví dụ: chữ Hán cực ngắn nhưng tiếng Việt dài lê thê chứa tiểu sử nhân vật do dóng hàng sai), giúp mô hình dịch máy không học phải dữ liệu nhiễu.
 
 ### 4.2. Các sản phẩm đầu ra đã tạo
 1.  **Các tệp cache dóng hàng**: Tệp `*_phase3.json` của 17 quyển được lưu và đồng bộ trực tiếp lên GitHub để phục vụ tái sản xuất nhanh.

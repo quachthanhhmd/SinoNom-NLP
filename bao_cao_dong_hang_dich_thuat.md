@@ -67,7 +67,7 @@ Quy trình thực hiện gồm 2 giai đoạn lớn: **Pipeline Dóng Hàng 3 Gi
 
 ```mermaid
 flowchart TD
-    subgraph Giai đoạn I: Dóng hàng 3 Phase (Ensemble Alignment)
+    subgraph "Giai đoạn I: Dóng hàng 3 Phase (Ensemble Alignment)"
         A[CSV Thô Hán & Việt] --> B[Phase 1: Ensemble Alignment]
         B -->|LaBSE + Vecalign + MiniLM + SimAlign| C[Đường dóng hàng tối ưu - Quy hoạch động]
         C --> D{Chênh lệch điểm tương đồng?}
@@ -80,7 +80,7 @@ flowchart TD
         G --> I
     end
 
-    subgraph Giai đoạn II: Tiền xử lý & Huấn luyện
+    subgraph "Giai đoạn II: Tiền xử lý & Huấn luyện"
         I --> J[Tách Train/Val Dataset]
         J --> K[Regex bóc tách Chú thích ngoặc đơn/ngoặc vuông]
         K --> L[Lọc tỷ lệ độ dài Length Ratio & Nhiễu OCR]
@@ -199,7 +199,7 @@ Dưới đây là bảng thống kê chi tiết sự thay đổi của hàm mấ
 ### 5.4. Trực quan hóa quá trình Huấn luyện (Biểu đồ Loss & BLEU)
 Biểu đồ trực quan dưới đây thể hiện đường cong suy giảm của Loss và tốc độ tăng trưởng vượt trội của điểm BLEU qua 20 Epochs:
 
-![Biểu đồ Loss và BLEU qua 20 Epochs](eval_bleu_loss_chart.png)
+<img src="eval_bleu_loss_chart.png" alt="Biểu đồ Loss và BLEU qua 20 Epochs" width="100%" />
 
 *Nhận xét từ biểu đồ*:
 - Đường cong Loss giảm dần đều và tiệm cận mức hội tụ ổn định sau 10 Epochs đầu.

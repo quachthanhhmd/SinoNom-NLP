@@ -8,25 +8,29 @@ class RegexSegmenter(Segmenter):
     def __init__(self, lang="han"):
         self.lang = lang
         if self.lang == "han":
-            # Punctuation for Classical Chinese/Sino-Nom, including newlines
-            self.pattern = re.compile(r'([。！？\.\!\?\n])')
+            # OCR line wraps are soft layout hints, not sentence boundaries.
+            self.pattern = re.compile(r'([。！？\.\!\?])')
         else:
-            # Punctuation for Vietnamese, including newlines
-            self.pattern = re.compile(r'([.!?\n])\s*')
+            self.pattern = re.compile(r'([.!?])\s*')
             
     def segment(self, text: str) -> List[str]:
-        # Simple split by punctuation, keeping the punctuation
-        parts = self.pattern.split(text)
         sentences = []
-        current = ""
-        for part in parts:
-            if self.pattern.match(part):
-                sentences.append(current + part)
-                current = ""
-            else:
-                current += part
-        if current.strip():
-            sentences.append(current)
+        # Preserve paragraph boundaries while joining arbitrary OCR/PDF line
+        # wraps inside a paragraph.
+        for paragraph in re.split(r'\n\s*\n+', text):
+            paragraph = re.sub(r'\s*\n\s*', ' ', paragraph).strip()
+            if not paragraph:
+                continue
+            parts = self.pattern.split(paragraph)
+            current = ""
+            for part in parts:
+                if self.pattern.fullmatch(part):
+                    sentences.append(current + part)
+                    current = ""
+                else:
+                    current += part
+            if current.strip():
+                sentences.append(current)
             
         return [s.strip() for s in sentences if s.strip()]
 
@@ -43,13 +47,12 @@ class UndertheseaSegmenter(Segmenter):
             
     def segment(self, text: str) -> List[str]:
         if not self.tokenizer:
-            # Fallback to simple regex if underthesea is missing
-            return [s.strip() for s in text.replace("\n", " ").split(".") if s.strip()]
+            return RegexSegmenter(lang="viet").segment(text)
             
         print("[Underthesea] Segmenting Vietnamese text...")
-        # Underthesea sent_tokenize returns a list of sentences
-        # We replace newlines with space first to prevent them from breaking sentences unnaturally,
-        # or we can keep them. Usually for PDF extraction, newlines are arbitrary.
-        clean_text = text.replace("\n", " ")
-        sentences = self.tokenizer(clean_text)
+        sentences = []
+        for paragraph in re.split(r'\n\s*\n+', text):
+            clean_text = re.sub(r'\s*\n\s*', ' ', paragraph).strip()
+            if clean_text:
+                sentences.extend(self.tokenizer(clean_text))
         return [s.strip() for s in sentences if s.strip()]

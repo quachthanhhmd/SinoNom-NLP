@@ -97,29 +97,58 @@ class CorpusExporter:
         df_full = pd.DataFrame(aligned_data)
         if not df_full.empty:
             df_full["viet_sentence"] = df_full["viet_sentence"].apply(clean_vietnamese_text)
-            df_full = df_full[["pair_id", "han_sentence", "viet_sentence", "similarity_score"]]
         else:
-            df_full = pd.DataFrame(columns=["pair_id", "han_sentence", "viet_sentence", "similarity_score"])
+            df_full = pd.DataFrame(columns=[
+                "pair_id", "han_sentence", "viet_sentence", "similarity_score",
+                "confidence", "status", "han_indices", "viet_indices",
+                "han_source_ids", "viet_source_ids", "volume",
+            ])
 
-        # ── Phiên bản đầy đủ nội bộ (4 cột, giữ nguyên các dòng NaN) ──────────
-        full_tsv_path = os.path.join(target_dir, f"{file_prefix}_parallel_full.tsv")
-        df_full.to_csv(full_tsv_path, sep="\t", index=False, encoding="utf-8")
-
-        # ── Phiên bản chuẩn yêu cầu (3 cột, lọc bỏ dòng NaN) ─────────────────
-        # Chỉ giữ các dòng có cả Hán lẫn Việt hợp lệ
         def _is_valid(val):
             if val is None:
                 return False
             s = str(val).strip()
             return bool(s) and s.lower() != "nan"
 
-        mask = df_full["han_sentence"].apply(_is_valid) & df_full["viet_sentence"].apply(_is_valid)
-        df_clean = df_full[mask][["pair_id", "han_sentence", "viet_sentence"]].reset_index(drop=True)
+        both_sides = (
+            df_full["han_sentence"].apply(_is_valid)
+            & df_full["viet_sentence"].apply(_is_valid)
+        )
+        if "status" not in df_full.columns:
+            df_full["status"] = "unmatched"
+            df_full.loc[both_sides, "status"] = "review"
+
+        # ── Phiên bản đầy đủ nội bộ (4 cột, giữ nguyên các dòng NaN) ──────────
+        full_tsv_path = os.path.join(target_dir, f"{file_prefix}_parallel_full.tsv")
+        df_full.to_csv(full_tsv_path, sep="\t", index=False, encoding="utf-8")
+
+        # Accepted data is the only training-ready partition.  Low-confidence
+        # matches and one-sided material remain traceable in separate queues.
+        accepted_mask = both_sides & (df_full["status"] == "accepted")
+        review_mask = both_sides & ~accepted_mask
+        unmatched_mask = ~both_sides
+        df_accepted = df_full[accepted_mask].reset_index(drop=True)
+        df_review = df_full[review_mask].reset_index(drop=True)
+        df_unmatched = df_full[unmatched_mask].reset_index(drop=True)
+        df_clean = df_accepted[["pair_id", "han_sentence", "viet_sentence"]].copy()
 
         clean_tsv_path = os.path.join(target_dir, f"{file_prefix}_parallel.tsv")
         clean_xlsx_path = os.path.join(target_dir, f"{file_prefix}_parallel.xlsx")
         df_clean.to_csv(clean_tsv_path, sep="\t", index=False, encoding="utf-8")
         df_clean.to_excel(clean_xlsx_path, index=False)
+
+        df_accepted.to_csv(
+            os.path.join(target_dir, f"{file_prefix}_accepted.tsv"),
+            sep="\t", index=False, encoding="utf-8",
+        )
+        df_review.to_csv(
+            os.path.join(target_dir, f"{file_prefix}_review.tsv"),
+            sep="\t", index=False, encoding="utf-8",
+        )
+        df_unmatched.to_csv(
+            os.path.join(target_dir, f"{file_prefix}_unmatched.tsv"),
+            sep="\t", index=False, encoding="utf-8",
+        )
 
         # ── Raw Hán text (nếu được cung cấp) ─────────────────────────────────
         if han_raw_text is not None:
@@ -131,6 +160,8 @@ class CorpusExporter:
         n_full = len(df_full)
         n_clean = len(df_clean)
         print(f"Exported hierarchical outputs to: {target_dir}")
-        print(f"  _parallel.tsv (chuẩn yêu cầu): {n_clean} cặp sạch / {n_full} tổng dòng")
+        print(f"  _parallel.tsv / _accepted.tsv: {n_clean} cặp accepted / {n_full} tổng dòng")
+        print(f"  _review.tsv:                    {len(df_review)} cặp cần duyệt")
+        print(f"  _unmatched.tsv:                 {len(df_unmatched)} dòng một phía")
         print(f"  _parallel_full.tsv (nội bộ):    {n_full} dòng (bao gồm NaN)")
 

@@ -47,9 +47,14 @@ ENSEMBLE_CONFIG = {
     },
     "dp": {
         "threshold": 0.32,
-        "skip_penalty": 0.05,
-        "max_merge_han": 15,
-        "max_merge_viet": 2,
+        # Keep local spans small enough to prevent a weak match from swallowing
+        # a whole paragraph.  The decoder supports every m-n transition inside
+        # these bounds (1-1, 1-2, 2-1, 2-2, 3-2, ...), not only k-1/1-l.
+        "skip_penalty": 0.18,
+        "merge_penalty": 0.04,
+        "length_weight": 0.08,
+        "max_merge_han": 3,
+        "max_merge_viet": 3,
     },
     "qwen_verifier": {
         "enabled": True,

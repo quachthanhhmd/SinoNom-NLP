@@ -4,14 +4,28 @@
 - Repository: `SinoNom-NLP`
 - Branch: `features/mapping-translation`
 - Baseline: `7b52a71cf1eef80640191d2866fb2a45d3553f22`
-- Phạm vi thay đổi của audit: chỉ tài liệu này; không sửa production logic
+- Phạm vi ban đầu của audit: tài liệu; trạng thái hiện tại đã có remediation implementation đi kèm
 - Artifact đối chiếu: `output/HVB_001/HVB_001_parallel.xlsx`, TSV tương ứng và các cache Phase 1/2/3
+
+## Trạng thái khắc phục sau audit
+
+Các finding bên dưới mô tả baseline đã tạo artifact cũ. Production code hiện đã được sửa ở các điểm đã chứng minh được bằng test:
+
+- thay mock mặc định bằng ensemble + true monotonic m–n decoder (`m,n ≤ 3`), có merge/skip/length prior và hard volume boundary;
+- giữ một CSV row là một source unit, không hard-split theo mọi whitespace; newline đơn là soft layout boundary;
+- nhận diện q8/q9 theo nội dung/manifest và tách 10→11, 16→17 theo heading thật, không theo prefix ID;
+- cache theo fingerprint input/config/schema và Phase 3 final không bị xử lý lại;
+- Phase 3 chỉ chấp nhận reference hợp lệ, đủ coverage, duy nhất, liên tiếp và đơn điệu; cụm quá lớn/invalid được giữ để review;
+- export tách `accepted`, `review`, `unmatched`, giữ provenance; downstream chỉ đọc accepted và deduplicate;
+- regression suite hiện có 13 test cho decoder, invariant, boundary, ordering, segmentation và LLM parser.
+
+Việc sửa code **không biến artifact `HVB_001_parallel.xlsx` cũ thành đúng**. Cần chạy lại pipeline để tạo corpus phiên bản mới, sau đó đánh giá trên gold sample trước khi khẳng định tỷ lệ đúng thực tế.
 
 ## 1. Executive summary
 
 Pipeline hiện tại **chưa đủ an toàn để xuất bản hoặc dùng trực tiếp làm dữ liệu huấn luyện**. Lỗi không đến từ một điểm duy nhất mà là chuỗi lỗi dữ liệu và kiến trúc:
 
-1. **Sai/mất mapping nguyên quyển trước alignment.** `q8_sentences.csv` chứa toàn ID `Q9_*`, còn `q9_sentences.csv` chứa toàn ID `Q8_*`. Hai file Hán mang tên ghép `q10_11_sentences.csv` và `q16_17_sentences.csv` thực tế chỉ chứa `Q10_*` và `Q16_*`; không có `Q11_*` hoặc `Q17_*`. Trong khi đó `run_mapping.py` ghép chúng lần lượt với bản Việt quyển 7–8, 9, 10–11 và 16–17. Đây là nguyên nhân trực tiếp có thể tạo lệch nguyên block.
+1. **Metadata quyển sai nhưng nội dung không mất như suy luận ban đầu.** Kiểm tra tiêu đề nội dung xác nhận `q8_sentences.csv` là quyển 8 dù ID mang prefix `Q9_*`; `q9_sentences.csv` là quyển 9 dù ID mang prefix `Q8_*`. `q10_11_sentences.csv` có cả tiêu đề quyển 10 và 11; `q16_17_sentences.csv` có cả quyển 16 và 17. Vì vậy không được rename/swap file mù hoặc kết luận Q11/Q17 bị thiếu theo ID. Lỗi thật là code tin prefix ID để chia quyển, khiến toàn bộ phần quyển 11/17 bị gán sai volume.
 2. **Artifact cuối chứa nguyên output Phase 3, kể cả blank.** `HVB_001_parallel.tsv` có 15.282 dòng và khớp chính xác 15.282/15.282 dòng khi nối các cache `*_phase3.json` theo thứ tự group. Trong đó chỉ 10.409 dòng có đủ Hán và Việt (68,1%); 3.188 dòng chỉ có Việt và 1.685 dòng chỉ có Hán.
 3. **Phase 3 có thể phá tính đơn điệu và tính duy nhất của index.** Parser tin output LLM nhưng không kiểm tra coverage, uniqueness hoặc order. Cache thực tế có duplicate/backtrack/gap của `han_indices`; có cặp merge đến 74 câu Hán mặc dù Phase 1 đặt trần 15.
 4. **Cache không gắn fingerprint đầu vào/cấu hình/model và resume không idempotent.** Cache Phase 3 được ưu tiên sử dụng dù cờ `--realign` có bật hay không; khi bật `--realign`, cache đã realign vẫn có thể bị quét và biến đổi lại.
@@ -113,7 +127,7 @@ Phase 1 cache giữ `han_indices` đơn điệu và không lặp. Sau Phase 3, m
 
 ## 5. Findings theo severity
 
-### S0 — Blocker: mapping dữ liệu nguồn sai/mất nguyên quyển
+### S0 — Blocker: chia volume theo metadata ID sai thay vì tiêu đề nội dung
 
 **Bằng chứng code**
 
@@ -122,23 +136,22 @@ Phase 1 cache giữ `han_indices` đơn điệu và không lặp. Sau Phase 3, m
 
 **Bằng chứng dữ liệu**
 
-- `dataset/MAPPING/sino_extract/q8_sentences.csv`: 1.400/1.400 ID có prefix `Q9_*`.
-- `dataset/MAPPING/sino_extract/q9_sentences.csv`: 926/926 ID có prefix `Q8_*`.
-- `q10_11_sentences.csv`: 1.027/1.027 ID là `Q10_*`; không có `Q11_*`.
-- `q16_17_sentences.csv`: 2.454/2.454 ID là `Q16_*`; không có `Q17_*`.
+- `q8_sentences.csv` có tiêu đề `大南一統志卷之八`; đây là quyển 8, chỉ prefix ID `Q9_*` sai.
+- `q9_sentences.csv` có tiêu đề `大南一統志卷之九`; đây là quyển 9, chỉ prefix ID `Q8_*` sai.
+- `q10_11_sentences.csv` có marker nội dung quyển 11 dù ID tiếp tục là `Q10_*`.
+- `q16_17_sentences.csv` có marker nội dung quyển 17 dù ID tiếp tục là `Q16_*`.
 
 **Tác động**
 
-- Group 7–8 nhận Hán quyển 7 + quyển 9 nhưng Việt quyển 7 + quyển 8.
-- Group 9 nhận Hán quyển 8 nhưng Việt quyển 9.
-- Nửa sau của group 10–11 và 16–17 không có block Hán tương ứng; global DP buộc phải skip, kéo, hoặc merge phần còn lại.
-- Đây là lời giải thích mạnh nhất cho hiện tượng lệch nguyên block ở nửa sau corpus.
+- Group 7–8 và group 9 dùng đúng nội dung quyển theo filename, nhưng provenance ID bị sai.
+- Logic tách group 10–11 và 16–17 theo prefix không bao giờ chuyển sang 11/17, nên attribution/export volume sai và hard boundary thật bị mất.
+- Lệch block trong artifact vẫn có thật, nhưng không được quy nguyên nhân cho “mất Q11/Q17”; nguyên nhân đã chứng minh là decoder/Phase 3/segmentation và volume attribution không an toàn.
 
 **Khắc phục bắt buộc**
 
-- Tạo manifest có `group_id`, `expected_han_volumes`, `expected_viet_volumes`, prefix/page range và checksum.
-- Fail fast nếu tập prefix quan sát khác tập kỳ vọng; không cho chạy model.
-- Xác minh nội dung tiêu đề/đầu quyển để phân biệt “đặt nhầm filename” với “đặt nhầm ID”.
+- Dùng filename/manifest để khai báo volume và tiêu đề nội dung để xác minh; giữ prefix ID gốc chỉ như provenance.
+- Với file ghép, tách tại marker tiêu đề `卷十一`/`卷十七`; fail fast nếu không tìm thấy đủ hai block.
+- Cấm transition alignment vượt qua boundary đã xác minh.
 
 ### S0 — Blocker: Phase 3 không bảo toàn coverage, uniqueness và monotonicity
 
@@ -341,8 +354,8 @@ Hiện `load_sino_csv()` giữ nguyên order file nhưng bỏ ID khỏi object t
 
 ## 6. Các giả thuyết cần xác minh
 
-1. **q8/q9 bị đổi filename hay đổi ID?** Xác minh tiêu đề đầu quyển, page range và nguồn scan; không chỉ rename theo prefix.
-2. **Q11 và Q17 đang thiếu thật hay ID prefix bị sai?** Tìm file/scan gốc, so tiêu đề/ending của Q10/Q16 và beginning của bản Việt.
+1. **Đã xác minh q8/q9:** filename và nội dung đúng quyển; prefix ID bị đảo.
+2. **Đã xác minh Q11/Q17:** nội dung tồn tại trong file ghép; prefix ID không chuyển theo volume.
 3. **Lệch nửa sau corpus chủ yếu bắt đầu tại boundary volume nào?** Tạo anchor gold tại đầu/cuối từng quyển; dự kiến q07_08, q09, q10_11 và q16_17 là điểm lỗi lớn.
 4. **Artifact root được tạo bằng bước ngoài repo.** Nội dung chứng minh nó là concat Phase 3 cache, nhưng code merge/renumber root không có trong production script hiện tại; cần tìm notebook/cell hoặc script đã dùng.
 5. **CSV Sino có phải OCR reading order đúng không?** ID cho biết page/row nhưng repo chưa có chain tái tạo CSV; cần spot-check ảnh theo các block bất thường.
@@ -532,8 +545,8 @@ Deliverable: corpus version mới + manifest/fingerprint + báo cáo chênh lệ
 **Ordering/input**
 
 - `page_1`, `page_2`, `page_10` phải natural-sort đúng.
-- q8 file chứa Q9 phải fail expected-prefix check.
-- q10_11 thiếu Q11 và q16_17 thiếu Q17 phải fail coverage.
+- q8/q9 phải được nhận diện theo heading/manifest và vẫn giữ original ID để audit.
+- q10_11 và q16_17 phải tách được hai volume theo heading; thiếu heading mới là lỗi fail-fast.
 - duplicate ID và ID quay lùi phải fail hoặc được ghi explicit exception trong manifest.
 - page-range ID như `page_11_12` phải được parser theo spec, không suy đoán.
 
@@ -646,7 +659,7 @@ Fixture phải gắn source volume/page/ID sau khi repair manifest, không chỉ
 ## 13. Thứ tự ưu tiên đề xuất
 
 1. Dừng dùng artifact hiện tại cho train/publish.
-2. Repair/verify q8↔q9, Q11, Q17 và tạo manifest fail-fast.
+2. Chuẩn hóa metadata q8/q9 và tách Q11/Q17 theo heading có fail-fast.
 3. Vô hiệu hóa mock `BERTAlignerWrapper` khỏi đường production.
 4. Thêm source-unit provenance và cache fingerprint.
 5. Thay Phase 3 splice bằng constrained validator; thêm invariant test.

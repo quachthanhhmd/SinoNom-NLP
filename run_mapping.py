@@ -2,9 +2,15 @@ import os
 import re
 import pandas as pd
 import argparse
+import hashlib
+import json
 from typing import List, Dict, Tuple
 from nlp.aligner import EmbeddingSentenceAligner, EnsembleSentenceAligner
+from nlp.alignment_core import validate_alignment_records
 from utils.exporters import CorpusExporter, clean_vietnamese_text
+from utils.source_boundaries import split_merged_sino_rows
+
+PIPELINE_CACHE_VERSION = "monotonic-mn-v2"
 
 
 def detect_separator(file_path: str) -> str:
@@ -63,6 +69,29 @@ def load_sino_csv(file_path: str) -> pd.DataFrame:
             sentences.append(sentence)
             
     return pd.DataFrame({"ID": ids, "sentence": sentences})
+
+
+def split_merged_sino_dataframe(df: pd.DataFrame, volume_codes: List[str]) -> Dict[str, pd.DataFrame]:
+    """Split a multi-volume OCR file by headings in its content, never by its IDs.
+
+    The checked source files keep Q10/Q16 prefixes after the Q11/Q17 headings,
+    so their ID prefix is metadata, not evidence of the actual volume.
+    """
+    rows = split_merged_sino_rows(df.to_dict(orient="records"), volume_codes)
+    return {volume: pd.DataFrame(items) for volume, items in rows.items()}
+
+
+def alignment_fingerprint(paths: List[str], settings: Dict) -> str:
+    """Hash source bytes and alignment settings so stale caches cannot be reused."""
+    digest = hashlib.sha256(PIPELINE_CACHE_VERSION.encode("utf-8"))
+    for path in sorted(paths, key=lambda item: os.path.basename(item).lower()):
+        # Hash the logical filename and bytes, not a temporary directory name.
+        digest.update(os.path.basename(path).lower().encode("utf-8"))
+        with open(path, "rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    digest.update(json.dumps(settings, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    return digest.hexdigest()[:16]
 
 def clean_vietnamese_sentence(sentence: str) -> bool:
     """
@@ -132,9 +161,14 @@ def process_alignment_group(
     # 1. Read Sino sentences and track their source volumes
     all_sino_sentences = []
     sino_source_map = [] # tracks which index in all_sino_sentences belongs to which volume code
+    sino_source_ids = []
+    sino_original_ids = []
     vol_raw_text = {}    # vol_code -> raw Han text string (for _raw.txt export)
+    han_breaks = []
     
     for vol_code, sino_path in sino_files:
+        if all_sino_sentences:
+            han_breaks.append(len(all_sino_sentences))
         if not os.path.exists(sino_path):
             raise FileNotFoundError(f"Sino file not found: {sino_path}")
         df_sino = load_sino_csv(sino_path)
@@ -155,12 +189,17 @@ def process_alignment_group(
                         skip_preface = False
                     else:
                         continue
-                # Split Han sentences by whitespace to break down merged lines
-                parts = [p.strip() for p in re.split(r'\s+', sent) if p.strip()]
-                for p in parts:
-                    all_sino_sentences.append(p)
-                    sino_source_map.append(vol_code)
-                    vol_sents_raw.append(p)
+                # A CSV row is one traceable source unit.  Whitespace is soft
+                # layout information and must not manufacture new sentences.
+                normalized = re.sub(r"\s+", " ", sent).strip()
+                all_sino_sentences.append(normalized)
+                sino_source_map.append(vol_code)
+                original_id = str(row.get("ID", "")).strip()
+                sino_source_ids.append(
+                    f"{os.path.basename(sino_path)}:{row.name}:{original_id}"
+                )
+                sino_original_ids.append(original_id)
+                vol_sents_raw.append(normalized)
         vol_raw_text[vol_code] = "\n".join(vol_sents_raw)
                 
     if not all_sino_sentences:
@@ -175,6 +214,8 @@ def process_alignment_group(
         raise KeyError(f"Column 'sentence' missing in {viet_file}")
         
     viet_sentences = []
+    viet_source_ids = []
+    viet_raw_sentences = []
     cleaned_count = 0
     printed_examples = 0
     
@@ -193,6 +234,11 @@ def process_alignment_group(
                 
         if clean_vietnamese_sentence(cleaned_sent):
             viet_sentences.append(cleaned_sent)
+            original_viet_id = str(row.get("ID", row.name))
+            viet_source_ids.append(
+                f"{os.path.basename(viet_file)}:{row.name}:{original_viet_id}"
+            )
+            viet_raw_sentences.append(sent)
             
     print(f"[Cleaner Log] Summary: Cleaned annotations/Han characters in {cleaned_count} sentence(s) out of {len(df_viet)} total rows.")
     
@@ -203,17 +249,22 @@ def process_alignment_group(
     print(f"Total Viet sentences to align (after cleaning): {len(viet_sentences)}")
     
     # Cache setup
-    import json
+    from config import ENSEMBLE_CONFIG
     group_key = os.path.splitext(os.path.basename(viet_file))[0]
     cache_dir = os.path.join(exporter.output_dir, work_code, "_cache")
     os.makedirs(cache_dir, exist_ok=True)
-    phase1_cache = os.path.join(cache_dir, f"{group_key}_phase1.json")
-    phase2_cache = os.path.join(cache_dir, f"{group_key}_phase2.json")
-    phase3_cache = os.path.join(cache_dir, f"{group_key}_phase3.json")
+    fingerprint = alignment_fingerprint(
+        [path for _, path in sino_files] + [viet_file],
+        {"ensemble": ENSEMBLE_CONFIG, "volumes": [volume for volume, _ in sino_files]},
+    )
+    phase1_cache = os.path.join(cache_dir, f"{group_key}_{fingerprint}_phase1.json")
+    phase2_cache = os.path.join(cache_dir, f"{group_key}_{fingerprint}_phase2.json")
+    phase3_cache = os.path.join(cache_dir, f"{group_key}_{fingerprint}_phase3.json")
     
     raw_aligned = None
     run_phase1 = True
     run_phase2 = True
+    run_phase3 = True
     
     # 3. Perform Alignment (or load from cache if available)
     if os.path.exists(phase3_cache):
@@ -223,6 +274,7 @@ def process_alignment_group(
             raw_aligned = json.load(f)
         run_phase1 = False
         run_phase2 = False
+        run_phase3 = False
     elif os.path.exists(phase2_cache):
         print(f"[Cache] Found Phase 2 cached alignment at: {phase2_cache}")
         print(f"[Cache] Loading cache to skip Phase 1 and Phase 2 computation...")
@@ -238,14 +290,16 @@ def process_alignment_group(
         run_phase1 = False
         
     if run_phase1 or raw_aligned is None:
+        # Prevent a merged transition from swallowing a verified volume edge.
+        aligner._han_breaks = han_breaks
         raw_aligned = aligner.align(all_sino_sentences, viet_sentences)
+        validate_alignment_records(raw_aligned, len(all_sino_sentences), len(viet_sentences))
         # Save Phase 1 cache
         with open(phase1_cache, "w", encoding="utf-8") as f:
             json.dump(raw_aligned, f, ensure_ascii=False, indent=2)
         print(f"[Cache] Saved Phase 1 alignment cache to: {phase1_cache}")
     
     # 3.5 Phase 2: Qwen LLM Verification
-    from config import ENSEMBLE_CONFIG
     qwen_conf = ENSEMBLE_CONFIG.get("qwen_verifier", {})
     if isinstance(aligner, EnsembleSentenceAligner) and qwen_enabled and qwen_conf.get("enabled", True) and run_phase2:
         # Giải phóng VRAM từ Phase 1 (LaBSE, BERTAlign, SimAlign) TRƯỚC khi nạp Qwen 7B
@@ -268,18 +322,25 @@ def process_alignment_group(
                         "han_sentence": item["han_sentence"],
                         "viet_sentence": "",
                         "similarity_score": 0.0,
-                        "han_indices": item.get("han_indices", [])
+                        "han_indices": item.get("han_indices", []),
+                        "viet_indices": [],
+                        "confidence": 0.0,
+                        "status": "unmatched",
                     })
                 if item["viet_sentence"]:
                     filtered_aligned.append({
                         "han_sentence": "",
                         "viet_sentence": item["viet_sentence"],
                         "similarity_score": 0.0,
-                        "han_indices": []
+                        "han_indices": [],
+                        "viet_indices": item.get("viet_indices", []),
+                        "confidence": 0.0,
+                        "status": "unmatched",
                     })
             else:
                 filtered_aligned.append(item)
         raw_aligned = filtered_aligned
+        validate_alignment_records(raw_aligned, len(all_sino_sentences), len(viet_sentences))
         
         # Save Phase 2 cache
         with open(phase2_cache, "w", encoding="utf-8") as f:
@@ -291,7 +352,7 @@ def process_alignment_group(
         verifier.free_gpu_memory()
 
     # 3.7 Phase 3: Qwen Local Re-Alignment of unresolved NaN clusters
-    if realign_enabled and isinstance(aligner, EnsembleSentenceAligner):
+    if realign_enabled and run_phase3 and isinstance(aligner, EnsembleSentenceAligner):
         from nlp.qwen_realigner import QwenRealigner
         # Reuse model and tokenizer if already loaded in Phase 2
         qwen_model = verifier._model if 'verifier' in locals() else None
@@ -304,35 +365,39 @@ def process_alignment_group(
         )
         raw_aligned = realigner.realign(raw_aligned, cache_path=phase3_cache)
 
-    # 4. Map the aligned pairs back to their respective volumes
-    # Backtrack aligned sentences using the original indices to figure out the volume
-    # raw_aligned is a list of {'pair_id': ..., 'han_sentence': ..., 'viet_sentence': ...}
-    # However, since the aligner might have concatenated m-n sentences, we should be careful.
-    # To map accurately, let's keep track of Han sentence indices.
-    
-    # Let's recreate alignment with indices mapping by running a quick match.
-    # This allows us to divide the aligned results back into their original volumes.
+    validate_alignment_records(raw_aligned, len(all_sino_sentences), len(viet_sentences))
+
+    # 4. Map pairs back to verified volume boundaries using source indices.
     volume_aligned_data = {} # vol_code -> list of aligned dicts
-    
-    # First, let's build a lookup dictionary for all_sino_sentences to find their volume code.
-    # Since we mapped them sequentially, we can track them.
-    # We can reconstruct the alignment with index markers.
-    
-    # We run the aligner again but we extract the index mapping by matching the text
-    # Or more robustly, we can modify the aligner to return index mappings.
-    # To keep code clean, let's do text matching. Since Hán sentences are mostly unique in a book, 
-    # we can search for the first Hán sentence in the aligned block to identify its volume.
-    
-    # Reconstruct the volume mapping using explicit Han index tracking (robust to out-of-order outputs)
-    current_vol = sino_source_map[0]
-    
+
+    known_record_volumes = []
     for item in raw_aligned:
+        h_idxs = item.get("han_indices", [])
+        if not h_idxs:
+            known_record_volumes.append(None)
+            continue
+        item_volumes = {sino_source_map[index] for index in h_idxs}
+        if len(item_volumes) != 1:
+            raise ValueError(
+                f"alignment span crosses verified volume boundary: {sorted(item_volumes)}"
+            )
+        known_record_volumes.append(next(iter(item_volumes)))
+
+    known_positions = [
+        position for position, volume in enumerate(known_record_volumes) if volume is not None
+    ]
+    for position, item in enumerate(raw_aligned):
         han_txt = item["han_sentence"]
         h_idxs = item.get("han_indices", [])
-        
-        if not han_txt or not h_idxs:
-            # If Hán is empty (Viet-only sentence), we assign it to the last active volume
-            vol = current_vol
+        if not h_idxs:
+            # A one-sided Vietnamese record has no intrinsic Han volume.  Use
+            # the nearest monotonic Han record (next wins a boundary tie) and
+            # keep it in the unmatched queue for human review.
+            nearest_position = min(
+                known_positions,
+                key=lambda candidate: (abs(candidate - position), candidate < position),
+            )
+            vol = known_record_volumes[nearest_position]
         else:
             first_idx = h_idxs[0]
             if not (0 <= first_idx < len(sino_source_map)):
@@ -341,28 +406,32 @@ def process_alignment_group(
                     f"Offending sentence: {repr(han_txt)}"
                 )
             vol = sino_source_map[first_idx]
-            current_vol = vol
                 
         if vol not in volume_aligned_data:
             volume_aligned_data[vol] = []
             
-        volume_aligned_data[vol].append({
-            "han_sentence": item["han_sentence"],
-            "viet_sentence": item["viet_sentence"],
-            "similarity_score": item.get("similarity_score", 0.0)
-        })
+        enriched = dict(item)
+        enriched["han_source_ids"] = [sino_source_ids[index] for index in h_idxs]
+        enriched["han_original_ids"] = [sino_original_ids[index] for index in h_idxs]
+        enriched["viet_source_ids"] = [
+            viet_source_ids[index] for index in item.get("viet_indices", [])
+        ]
+        enriched["viet_raw_sentences"] = [
+            viet_raw_sentences[index] for index in item.get("viet_indices", [])
+        ]
+        enriched["volume"] = vol
+        volume_aligned_data[vol].append(enriched)
         
     # 5. Export each volume to its hierarchical directory
     for vol_code, aligned_list in volume_aligned_data.items():
         # Re-number the pair_ids for this specific volume starting at 1
         formatted_aligned = []
         for idx, item in enumerate(aligned_list):
-            formatted_aligned.append({
+            formatted_item = dict(item)
+            formatted_item.update({
                 "pair_id": f"{work_code}_{vol_code}_{idx+1:06d}",
-                "han_sentence": item["han_sentence"],
-                "viet_sentence": item["viet_sentence"],
-                "similarity_score": item.get("similarity_score", 0.0)
             })
+            formatted_aligned.append(formatted_item)
             
         print(f"Exporting Volume {vol_code} with {len(formatted_aligned)} aligned pairs...")
         exporter.export_hierarchical(
@@ -485,57 +554,29 @@ def main():
                 print(f"\n--- Special handling for merged volume Hán file: {fname} ---")
                 df_temp = load_sino_csv(sino_path)
                 
-                # Check IDs to split
-                # e.g., ID format: Q10_2_001 -> volume "10", Q11_3_001 -> volume "11"
-                # e.g., ID format: Q16_... -> volume "16", Q17_... -> volume "17"
-                # We can group sentences by their volume prefix from the ID column.
-                vol_sentences = {} # vol_code -> list of dicts
-                
-                for _, row in df_temp.iterrows():
-                    sent_id = str(row['ID'])
-                    sentence = str(row['sentence']).strip()
-                    if not sentence:
-                        continue
-                    # extract volume number from ID like "Q10_2_001" -> "10"
-                    match = re.match(r"[qQ](\d+)_", sent_id)
-                    if match:
-                        vol_num = f"{int(match.group(1)):02d}"
-                    else:
-                        raise ValueError(f"Unexpected ID format in merged volume file {fname}: {repr(sent_id)}")
-                        
-                    if vol_num not in vol_sentences:
-                        vol_sentences[vol_num] = []
-                    vol_sentences[vol_num].append({
-                        "ID": sent_id,
-                        "sentence": sentence,
-                        "reference_Id": "[]"
-                    })
-                
-                # Now we write temporary split CSV files so we can reuse the process_alignment_group logic!
-                temp_sino_files = []
-                for vol_num, sents_dicts in vol_sentences.items():
-                    temp_csv_path = os.path.join(args.sino_dir, f"temp_split_{vol_num}.csv")
-                    pd.DataFrame(sents_dicts).to_csv(temp_csv_path, index=False)
-                    temp_sino_files.append((vol_num, temp_csv_path))
-                
-                # Sort temp files so volume "10" comes before "11", and "16" before "17"
-                temp_sino_files.sort(key=lambda x: x[0])
-                
-                # Run alignment
-                process_alignment_group(
-                    sino_files=temp_sino_files,
-                    viet_file=viet_file,
-                    aligner=aligner,
-                    exporter=exporter,
-                    work_code=args.work_code,
-                    qwen_enabled=args.qwen,
-                    realign_enabled=args.realign
-                )
-                
-                # Clean up temporary split files
-                for _, temp_path in temp_sino_files:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
+                expected_volumes = ["10", "11"] if fname.startswith("q10") else ["16", "17"]
+                split_frames = split_merged_sino_dataframe(df_temp, expected_volumes)
+
+                # Temporary files live outside the source corpus and are
+                # removed automatically.  The original OCR extracts are never
+                # renamed or rewritten.
+                import tempfile
+                with tempfile.TemporaryDirectory(prefix="sinonom_volume_split_") as temp_dir:
+                    temp_sino_files = []
+                    for vol_num in expected_volumes:
+                        temp_csv_path = os.path.join(temp_dir, f"volume_{vol_num}.csv")
+                        split_frames[vol_num].to_csv(temp_csv_path, index=False)
+                        temp_sino_files.append((vol_num, temp_csv_path))
+
+                    process_alignment_group(
+                        sino_files=temp_sino_files,
+                        viet_file=viet_file,
+                        aligner=aligner,
+                        exporter=exporter,
+                        work_code=args.work_code,
+                        qwen_enabled=args.qwen,
+                        realign_enabled=args.realign
+                    )
             else:
                 print(f"[Error] Merged sino file not found: {sino_path}")
         else:

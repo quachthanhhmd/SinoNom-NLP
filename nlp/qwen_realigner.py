@@ -24,6 +24,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import ENSEMBLE_CONFIG
+from nlp.alignment_core import validate_alignment_records
 
 
 class QwenRealigner:
@@ -324,7 +325,8 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
         response_text: str,
         han_sentences: List[str],
         viet_sentences: List[str],
-        global_han_indices: List[int],
+        global_han_indices: List[List[int]],
+        global_viet_indices: List[List[int]],
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Parse Qwen's JSON output and resolve H/V references to actual sentence text.
@@ -392,6 +394,8 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
             return None
 
         results = []
+        used_han_refs = []
+        used_viet_refs = []
         for item in raw_pairs:
             if not isinstance(item, dict):
                 continue
@@ -400,29 +404,64 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
             han_val = item.get("han")
             viet_val = item.get("viet")
 
-            han_text = self._resolve_text(han_val, han_sentences, "H")
-            viet_text = self._resolve_text(viet_val, viet_sentences, "V")
+            han_refs = self._resolve_refs(han_val, len(han_sentences), "H")
+            viet_refs = self._resolve_refs(viet_val, len(viet_sentences), "V")
+            if han_refs is None or viet_refs is None or (not han_refs and not viet_refs):
+                return None
+            if han_refs and han_refs != list(range(han_refs[0], han_refs[-1] + 1)):
+                return None
+            if viet_refs and viet_refs != list(range(viet_refs[0], viet_refs[-1] + 1)):
+                return None
+            used_han_refs.extend(han_refs)
+            used_viet_refs.extend(viet_refs)
+            han_text = " ".join(han_sentences[index] for index in han_refs)
+            viet_text = " ".join(viet_sentences[index] for index in viet_refs)
 
             # Resolve references to actual index list
-            resolved_indices = []
-            if han_val is not None:
-                val_str = str(han_val).strip()
-                refs = re.findall(r"H(\d+)", val_str, re.IGNORECASE)
-                for ref in refs:
-                    idx = int(ref) - 1
-                    if 0 <= idx < len(global_han_indices):
-                        resolved_indices.extend(global_han_indices[idx])
+            resolved_han_indices = [
+                source_index for ref in han_refs for source_index in global_han_indices[ref]
+            ]
+            resolved_viet_indices = [
+                source_index for ref in viet_refs for source_index in global_viet_indices[ref]
+            ]
 
             if han_text or viet_text:
                 results.append({
                     "han_sentence": han_text or "",
                     "viet_sentence": viet_text or "",
-                    "similarity_score": 0.75 if (han_text and viet_text) else 0.0,
+                    # LLM proposals are routed to review.  Do not fabricate a
+                    # semantic score or promote them to accepted automatically.
+                    "similarity_score": 0.0,
                     "qwen_realigned": True,
-                    "han_indices": resolved_indices
+                    "han_indices": resolved_han_indices,
+                    "viet_indices": resolved_viet_indices,
+                    "confidence": 0.0,
+                    "status": "review" if (han_text and viet_text) else "unmatched",
                 })
 
+        if used_han_refs != list(range(len(han_sentences))):
+            return None
+        if used_viet_refs != list(range(len(viet_sentences))):
+            return None
+        try:
+            validate_alignment_records(results)
+        except ValueError:
+            return None
         return results if results else None
+
+    def _resolve_refs(self, val: Any, sentence_count: int, prefix: str) -> Optional[List[int]]:
+        """Accept only explicit H/V references; reject copied or invented text."""
+        if val is None or str(val).strip().lower() == "null":
+            return []
+        value = str(val).strip()
+        refs = [int(item) - 1 for item in re.findall(rf"{prefix}(\d+)", value, re.IGNORECASE)]
+        residue = re.sub(rf"{prefix}\d+", "", value, flags=re.IGNORECASE)
+        residue = re.sub(r"[+\s,;]", "", residue)
+        if residue or not refs or any(index < 0 or index >= sentence_count for index in refs):
+            return None
+        if refs != sorted(set(refs)):
+            return None
+        return refs
 
     def _resolve_text(
         self, val: Any, sentences: List[str], prefix: str
@@ -450,8 +489,8 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                     parts.append(sentences[idx])
             return " ".join(parts) if parts else None
 
-        # Otherwise treat as plain text returned directly by Qwen
-        return val
+        # Plain text is never trusted: the model must cite source references.
+        return None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -473,6 +512,13 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
         import json
         import os
 
+        original_han_indices = [
+            index for pair in aligned_pairs for index in pair.get("han_indices", [])
+        ]
+        original_viet_indices = [
+            index for pair in aligned_pairs for index in pair.get("viet_indices", [])
+        ]
+
         # Resume from checkpoint if cache_path exists
         if cache_path and os.path.exists(cache_path):
             print(f"[Cache] Found Phase 3 checkpoint/cached alignment at: {cache_path}")
@@ -488,6 +534,9 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
         clusters = self._detect_nan_clusters(aligned_pairs)
         if not clusters:
             print("[QwenRealign] No NaN clusters found. Phase 3 completed/skipped.")
+            expected_han_count = max(original_han_indices) + 1 if original_han_indices else 0
+            expected_viet_count = max(original_viet_indices) + 1 if original_viet_indices else 0
+            validate_alignment_records(aligned_pairs, expected_han_count, expected_viet_count)
             return aligned_pairs
 
         print(f"[QwenRealign] Found {len(clusters)} NaN cluster(s) to re-align.")
@@ -507,47 +556,30 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
         for cluster_start, cluster_end, cluster_han, cluster_viet in reversed(clusters):
             # Extract Han indices for the cluster (preserving 1-to-1 mapping even for merged sentences)
             cluster_han_indices = []
+            cluster_viet_indices = []
             for item in aligned_pairs[cluster_start:cluster_end]:
                 h = str(item.get("han_sentence", "") or "").strip()
                 h_is_nan = not h or h.lower() == "nan"
                 if not h_is_nan:
                     cluster_han_indices.append(item.get("han_indices", []))
+                v = str(item.get("viet_sentence", "") or "").strip()
+                if v and v.lower() != "nan":
+                    cluster_viet_indices.append(item.get("viet_indices", []))
 
             # Proportional slicing for large clusters to prevent VRAM OOM (Qwen limit=12, Gemini safety limit=30 to maintain reasoning accuracy)
-            sub_clusters = []
             limit = 30 if is_gemini else 12
             if len(cluster_han) > limit or len(cluster_viet) > limit:
-                n_han = len(cluster_han)
-                n_viet = len(cluster_viet)
-                max_len = max(n_han, n_viet)
-                num_chunks = (max_len + (limit - 1)) // limit
-                
-                h_step = max(1, int(n_han / num_chunks))
-                v_step = max(1, int(n_viet / num_chunks))
-                
                 print(
-                    f"[QwenRealign] Cluster [{cluster_start}:{cluster_end}] is large "
-                    f"({n_han} Han, {n_viet} Viet). Slicing into {num_chunks} sub-cluster(s) of max size {limit}..."
+                    f"[QwenRealign] Cluster [{cluster_start}:{cluster_end}] exceeds the safe "
+                    f"window ({len(cluster_han)} Han, {len(cluster_viet)} Viet). "
+                    "Leaving it unmatched for review instead of guessing a proportional split."
                 )
-                
-                for chunk_no in range(num_chunks):
-                    h_start = chunk_no * h_step
-                    h_end = h_start + h_step if chunk_no < num_chunks - 1 else n_han
-                    
-                    v_start = chunk_no * v_step
-                    v_end = v_start + v_step if chunk_no < num_chunks - 1 else n_viet
-                    
-                    sub_clusters.append((
-                        cluster_han[h_start:h_end],
-                        cluster_viet[v_start:v_end],
-                        cluster_han_indices[h_start:h_end]
-                    ))
-            else:
-                sub_clusters.append((cluster_han, cluster_viet, cluster_han_indices))
+                continue
+            sub_clusters = [(cluster_han, cluster_viet, cluster_han_indices, cluster_viet_indices)]
 
             combined_new_pairs = []
             
-            for sub_han, sub_viet, sub_han_indices in sub_clusters:
+            for sub_han, sub_viet, sub_han_indices, sub_viet_indices in sub_clusters:
                 print(
                     f"[QwenRealign]   Processing sub-cluster with {len(sub_han)} Han, {len(sub_viet)} Viet..."
                 )
@@ -617,20 +649,29 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                         output_tokens[0][input_len:], skip_special_tokens=True
                     )
 
-                new_pairs = self._parse_realign_response(response_text, sub_han, sub_viet, sub_han_indices)
+                new_pairs = self._parse_realign_response(
+                    response_text,
+                    sub_han,
+                    sub_viet,
+                    sub_han_indices,
+                    sub_viet_indices,
+                )
                 if new_pairs is None:
-                    raise ValueError(
-                        f"QwenRealign failed to parse LLM output for sub-cluster.\n"
-                        f"Han sentences: {sub_han}\n"
-                        f"Viet sentences: {sub_viet}\n"
-                        f"Raw Qwen response: {repr(response_text)}"
+                    print(
+                        "[QwenRealign] Rejected invalid LLM proposal; cluster remains "
+                        "unmatched for review."
                     )
+                    combined_new_pairs = []
+                    break
                 
                 combined_new_pairs.extend(new_pairs)
                 if is_gemini:
                     time.sleep(2.0)
 
-            # Replace the cluster slice with the combined re-aligned and/or fallback pairs
+            if not combined_new_pairs:
+                continue
+
+            # Replace only a complete, validated proposal.
             aligned_pairs[cluster_start:cluster_end] = combined_new_pairs
             total_fixed += 1
             print(
@@ -651,4 +692,7 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
             f"[QwenRealign] Phase 3 complete. "
             f"Fixed {total_fixed}/{len(clusters)} cluster(s)."
         )
+        expected_han_count = max(original_han_indices) + 1 if original_han_indices else 0
+        expected_viet_count = max(original_viet_indices) + 1 if original_viet_indices else 0
+        validate_alignment_records(aligned_pairs, expected_han_count, expected_viet_count)
         return aligned_pairs

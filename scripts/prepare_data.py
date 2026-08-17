@@ -16,10 +16,12 @@ def main():
     
     all_pairs = []
     
-    # Traverse directory to find all _parallel.tsv files
+    seen_pairs = set()
+    # Only the accepted partition is training-ready.  Reading every file named
+    # *_parallel.tsv could ingest both a merged artifact and per-volume copies.
     for root, dirs, files in os.walk(work_dir):
         for file in files:
-            if file.endswith("_parallel.tsv"):
+            if file.endswith("_accepted.tsv"):
                 tsv_path = os.path.join(root, file)
                 print(f"  Reading: {tsv_path}")
                 try:
@@ -29,7 +31,9 @@ def main():
                     for _, row in df.iterrows():
                         han = str(row["han_sentence"]).strip()
                         viet = str(row["viet_sentence"]).strip()
-                        if han and viet:
+                        stable_key = (han, viet)
+                        if han and viet and stable_key not in seen_pairs:
+                            seen_pairs.add(stable_key)
                             all_pairs.append({
                                 "translation": {
                                     "zh": han,

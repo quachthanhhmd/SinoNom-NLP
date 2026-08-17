@@ -65,10 +65,12 @@ Tầng dóng hàng thô sử dụng tổ hợp 4 bộ chấm điểm (Scorers) �
 Vì ma trận SimAlign là ma trận thưa (chỉ tính cho top-5), tại các ô $(i,j)$ mà SimAlign có điểm số bằng $0$, hệ thống tự động phân bổ lại trọng số $0.15$ của SimAlign cho 3 bộ scorers còn lại theo tỷ lệ thuận để tránh làm giảm điểm tương đồng oan của cặp câu.
 
 #### Quy hoạch động (Dynamic Programming):
-Dựa trên ma trận điểm cuối cùng, thuật toán DP tìm đường đi tối ưu nhất với các ràng buộc kích thước ghép câu:
-- `max_merge_han = 15`: Cho phép ghép tối đa 15 câu chữ Hán (để đối phó với hiện tượng ngắt dòng lỗi trong OCR Hán).
-- `max_merge_viet = 2`: Giới hạn ghép tối đa 2 câu tiếng Việt.
-- Ngưỡng cắt dứt điểm (Threshold): `0.32`. Các cặp có score dưới `0.32` sẽ bị tách thành các câu đơn và đánh dấu khuyết (`NaN`).
+Dựa trên ma trận điểm cuối cùng, decoder monotonic xét mọi transition liên tiếp `m↔n` trong giới hạn cấu hình, gồm `1↔1`, `1↔2`, `2↔1`, `2↔2`, `3↔2`, `2↔3`, `3↔3` và skip một phía:
+- `max_merge_han = 3`, `max_merge_viet = 3`.
+- Mỗi source index phải xuất hiện đúng một lần trong toàn path; duplicate, gap, overlap và backtrack đều làm pipeline fail.
+- Transition không được vượt boundary quyển đã xác minh.
+- Merge có penalty riêng; skip penalty là `0.18`; score còn có length-ratio prior để hạn chế nuốt cả đoạn.
+- Pair đủ hai phía được phân loại `accepted` hoặc `review` theo confidence; câu một phía là `unmatched`.
 
 ---
 
@@ -95,14 +97,11 @@ Mô hình Qwen được cấu hình với prompt nghiêm ngặt nhằm hướng 
 
 Sau Phase 2, các câu bị loại bỏ hoặc không thể dóng hàng tự động ở Phase 1 sẽ gom lại thành các cụm câu khuyết liền kề (NaN Clusters). Nếu một cụm NaN chứa cả câu Hán và câu Việt, Phase 3 sẽ gọi Qwen để dóng hàng lại cục bộ.
 
-#### Thuật toán Phân tách Cụm tỷ lệ (Proportional Cluster Slicing):
-Để giải quyết triệt để lỗi tràn bộ nhớ card đồ họa (**CUDA Out of Memory**) khi gặp cụm NaN quá lớn (ví dụ: khối nghẽn chứa 226 câu Hán và 29 câu Việt):
-1. **Kiểm tra kích thước:** Nếu số câu Hán hoặc Việt của cụm vượt quá `12`, thuật toán phân tách sẽ được kích hoạt.
-2. **Tính toán bước nhảy:** Xác định số lượng mảnh cắt `num_chunks = ceil(max_len / 12)`. Tính toán bước nhảy Hán (`h_step`) và Việt (`v_step`) tương ứng theo tỷ lệ số câu của cụm gốc.
-3. **Băm khối tuần tự:** Cắt cụm lớn thành các khối con độc lập có kích thước nhỏ gọn (tối đa 12 câu Hán/Việt trên một khối).
-4. **Xử lý tuần tự và Cô lập lỗi:** 
-   - Gửi từng khối con cho Qwen để xử lý dóng hàng.
-   - Nếu bất kỳ khối con nào gặp lỗi hoặc bị tràn VRAM, hệ thống sẽ **cô lập khối con đó** (giữ nguyên trạng thái NaN cho các câu trong khối đó), các khối con chạy thành công khác vẫn sẽ được dóng hàng và cứu dữ liệu bình thường, không gây ảnh hưởng đến toàn bộ cụm lớn.
+#### Validator bắt buộc và cửa sổ an toàn:
+1. LLM chỉ được trả về reference `H1..Hn` và `V1..Vn`; plain text hoặc ID ngoài range bị từ chối.
+2. Proposal chỉ được splice khi dùng đủ mỗi reference đúng một lần, đúng thứ tự, theo span liên tiếp và bảo toàn cả `han_indices` lẫn `viet_indices`.
+3. Cụm vượt cửa sổ an toàn không còn bị cắt theo tỷ lệ mù. Cụm đó được giữ ở `unmatched/review` để tìm anchor hoặc duyệt tay.
+4. Proposal invalid không làm mất dữ liệu và không được gắn confidence giả; toàn cluster cũ được giữ nguyên.
 
 ---
 
@@ -116,9 +115,13 @@ Sau Phase 2, các câu bị loại bỏ hoặc không thể dóng hàng tự đ�
   - Tệp CSV chứa cột `sentence` đại diện cho các câu tiếng Việt dịch nghĩa tương ứng.
 
 ### 6.2. Dữ liệu Đầu ra (Outputs)
-Sau khi kết thúc quy trình, dữ liệu được ghi dưới dạng thư mục phân cấp phục vụ huấn luyện:
-- Tệp TSV (`_parallel.tsv`): Định dạng phân tách bằng tab gồm 3 cột chuẩn `pair_id \t han_sentence \t viet_sentence`.
-- Tệp Excel (`_parallel.xlsx`): Chứa thêm cột `similarity_score` để phục vụ công tác kiểm tra thủ công.
+Sau khi kết thúc quy trình, dữ liệu được ghi thành các partition rõ ràng:
+- `*_accepted.tsv`: chỉ các cặp đủ hai phía, confidence đạt gate; đây là input duy nhất cho `scripts/prepare_data.py`.
+- `*_review.tsv`: cặp đủ hai phía nhưng confidence thấp hoặc do LLM đề xuất; giữ source IDs, indices và score.
+- `*_unmatched.tsv`: material một phía; không được gọi là parallel pair.
+- `*_parallel_full.tsv`: bản audit đầy đủ có provenance. `*_parallel.tsv/xlsx` là compatibility view chỉ chứa accepted.
+
+Cache mang fingerprint của source bytes, cấu hình và schema pipeline. Đổi input/config tạo cache miss; Phase 3 final cache không bị realign lại.
 
 ---
 

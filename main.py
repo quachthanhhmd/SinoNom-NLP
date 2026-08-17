@@ -6,7 +6,7 @@ from ocr.providers import KanDianGuJiOCR, PaddleOCRProvider
 from ocr.ensemble import EnsembleOCR
 from ocr.corrector import GeminiOCRCorrector
 from nlp.segmenter import RegexSegmenter, UndertheseaSegmenter
-from nlp.aligner import BERTAlignerWrapper, TranslationCosineAligner
+from nlp.aligner import EnsembleSentenceAligner
 from core.pipeline import CorpusPipeline
 from utils.exporters import CorpusExporter
 
@@ -61,7 +61,7 @@ def main():
     # 3. NLP Components
     han_segmenter = RegexSegmenter(lang="han")
     viet_segmenter = UndertheseaSegmenter()
-    aligner = BERTAlignerWrapper()  # Default to BERT since Gemini is disabled
+    aligner = EnsembleSentenceAligner()  # Canonical semantic + monotonic m-n aligner
     
     # 4. Exporter
     exporter = CorpusExporter(output_dir=args.output_dir)
@@ -84,8 +84,15 @@ def main():
         print(f"Error: Directory {args.viet_dir} does not exist.")
         return
 
-    han_works = sorted([d for d in os.listdir(args.han_dir) if os.path.isdir(os.path.join(args.han_dir, d))])
-    viet_pdfs = sorted([f for f in os.listdir(args.viet_dir) if f.lower().endswith(".pdf")])
+    from core.pipeline import natural_sort_key
+    han_works = sorted(
+        [d for d in os.listdir(args.han_dir) if os.path.isdir(os.path.join(args.han_dir, d))],
+        key=natural_sort_key,
+    )
+    viet_pdfs = sorted(
+        [f for f in os.listdir(args.viet_dir) if f.lower().endswith(".pdf")],
+        key=natural_sort_key,
+    )
     
     if not han_works:
         print(f"No work directories found in {args.han_dir}")

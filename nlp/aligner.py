@@ -2,6 +2,7 @@ from typing import List, Dict
 import numpy as np
 import google.generativeai as genai
 from core.interfaces import Aligner
+from nlp.alignment_core import monotonic_span_align
 
 class BERTAlignerWrapper(Aligner):
     """Wrapper for BERTAlign."""
@@ -171,6 +172,24 @@ class EmbeddingSentenceAligner(Aligner):
         # Normalize baseline embeddings
         han_embeds_norm = han_embeds / np.linalg.norm(han_embeds, axis=1, keepdims=True)
         viet_embeds_norm = viet_embeds / np.linalg.norm(viet_embeds, axis=1, keepdims=True)
+
+        # Decode the base semantic matrix with the same invariant-preserving
+        # m-n decoder used by the ensemble aligner.  This replaces the former
+        # k-1/1-l-only path and always returns both Han and Viet source indices.
+        from config import ENSEMBLE_CONFIG
+        dp_conf = ENSEMBLE_CONFIG.get("dp", {})
+        return monotonic_span_align(
+            han_embeds_norm @ viet_embeds_norm.T,
+            han_sentences,
+            viet_sentences,
+            max_merge_han=dp_conf.get("max_merge_han", 3),
+            max_merge_viet=dp_conf.get("max_merge_viet", 3),
+            threshold=dp_conf.get("threshold", 0.32),
+            skip_penalty=dp_conf.get("skip_penalty", 0.18),
+            merge_penalty=dp_conf.get("merge_penalty", 0.04),
+            length_weight=dp_conf.get("length_weight", 0.08),
+            han_breaks=getattr(self, "_han_breaks", None),
+        )
         
         # DP Hyperparameters
         threshold = 0.38 # lowered threshold to capture long-short alignments securely after preface filtering
@@ -526,6 +545,29 @@ class EnsembleSentenceAligner(Aligner):
 
         # Initialize fuser
         fuser = EnsembleFuser(active_weights)
+
+        # The scorer ensemble produces a sentence-level semantic matrix.  A
+        # single generic decoder now evaluates every bounded m-n transition
+        # and enforces complete, unique, monotonic coverage.  The old decoder
+        # below is intentionally bypassed because it only supported k-1/1-l.
+        base_similarity = fuser.fuse(score_matrices)
+        results = monotonic_span_align(
+            base_similarity,
+            han_sentences,
+            viet_sentences,
+            max_merge_han=max_merge_han,
+            max_merge_viet=max_merge_viet,
+            threshold=threshold,
+            skip_penalty=skip_penalty,
+            merge_penalty=dp_conf.get("merge_penalty", 0.04),
+            length_weight=dp_conf.get("length_weight", 0.08),
+            han_breaks=getattr(self, "_han_breaks", None),
+        )
+        print(
+            f"[Aligner] True monotonic m-n decoder produced {len(results)} records "
+            f"in {__import__('time').time() - t_phase1:.2f}s."
+        )
+        return results
 
         # ----------------------------------------------------
         # 2. Vectorized Group Similarity Precomputation

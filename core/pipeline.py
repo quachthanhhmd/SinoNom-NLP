@@ -1,6 +1,7 @@
 import os
 from core.interfaces import OCRProvider, OCRCorrector, Segmenter, Aligner
 from utils.exporters import CorpusExporter
+from utils.source_boundaries import natural_sort_key
 
 class CorpusPipeline:
     def __init__(
@@ -41,7 +42,7 @@ class CorpusPipeline:
                 image_files = sorted([
                     f for f in os.listdir(han_input) 
                     if f.lower().endswith((".png", ".jpg", ".jpeg"))
-                ])
+                ], key=natural_sort_key)
                 
                 if first_n_images is not None:
                     image_files = image_files[:first_n_images]
@@ -123,7 +124,10 @@ class CorpusPipeline:
                 print(f"  Extracting from: {han_input}")
                 han_texts = []
                 if os.path.isdir(han_input):
-                    image_files = sorted([f for f in os.listdir(han_input) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
+                    image_files = sorted(
+                        [f for f in os.listdir(han_input) if f.lower().endswith((".png", ".jpg", ".jpeg"))],
+                        key=natural_sort_key,
+                    )
                     if first_n_images is not None:
                         image_files = image_files[:first_n_images]
                     

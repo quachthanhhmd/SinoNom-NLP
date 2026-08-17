@@ -33,7 +33,7 @@ You can customize directories or run specific steps of the pipeline using the fo
 Use these flags to run only specific parts of the process, which is useful for debugging or resuming work:
 - `--step_ocr` : Run **Step 1** only. Performs OCR on the Hán images and saves the raw text to `han_raw.txt`.
 - `--step_seg` : Run **Step 2** only. Reads the translated PDF, and runs NLP segmentation (Underthesea) on both the Hán and Việt texts.
-- `--step_align` : Run **Step 3** only. Runs the alignment algorithm (TF-IDF Cosine Similarity / BERT) to map Hán sentences to Việt sentences (m-n mapping) and exports the Excel/TSV files.
+- `--step_align` : Run **Step 3** only. Runs the semantic ensemble and constrained monotonic m-n decoder, then exports Excel/TSV files.
 - `--run_all` : Explicitly run all the steps above sequentially.
 - `--first-n-images` : (Optional) Limit OCR to only the first *N* images in each Hán input folder. Useful for testing pipelines on large books. Usage: `--first-n-images 5`
 
@@ -48,4 +48,6 @@ You can set default API keys and paths in a `.env` file in the root directory:
 ```env
 GEMINI_API_KEY="your_api_key_here"
 ```
-*(Note: API keys are strictly optional. The system will gracefully fall back to local models like PaddleOCR and BERTAlign if no keys are provided.)*
+*(Note: API keys are optional for the canonical local OCR and Phase-1 semantic alignment. Phase 3 requires the configured Gemini API model unless a local realigner model is selected.)*
+
+For the checked-in `dataset/MAPPING` corpus, use `run_mapping.py`. New outputs are separated into `*_accepted.tsv`, `*_review.tsv`, and `*_unmatched.tsv`; only the accepted partition is consumed by `scripts/prepare_data.py`. Existing `HVB_001_parallel.*` files are audit baselines and are not rewritten automatically.

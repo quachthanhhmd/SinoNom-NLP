@@ -1,142 +1,181 @@
-"""
-Qwen Verifier — Phase 2 post-processing using Qwen2.5-7B-Instruct.
+"""Strict completeness verification for Hán--Việt alignment beads.
 
-Runs offline on Kaggle (using 4-bit quantization via bitsandbytes to fit in T4 GPU).
-Filters out incorrect alignments by scoring them 0-5.
-Only processes aligned pairs within the "uncertain zone" (e.g. ensemble score in [0.38, 0.50]).
+Phase 1 similarity is useful for proposing boundaries, but it is not evidence
+that a bead is complete. This verifier checks *every* two-sided bead and labels
+it using the evaluator's exact/addition/omission/mismatch rubric.
 """
 
+from __future__ import annotations
+
+import json
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional
 
 from config import ENSEMBLE_CONFIG
+from nlp.bead_quality import COMPLETENESS_LABELS, bead_key, has_text, normalize_label
 
 
 class QwenVerifier:
-    """
-    Offline LLM verification filter using Qwen2.5-7B-Instruct.
-
-    Only runs verification on candidate sentence pairs that fall into the
-    similarity score uncertainty band. Other pairs are auto-approved.
-    """
+    """Offline Qwen verifier, with an optional Gemini-compatible backend."""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        # Fallback to default config if none provided
         self.config = config or ENSEMBLE_CONFIG.get("qwen_verifier", {})
-        self.model_name = self.config.get("verifier_model_name") or self.config.get("model_name", "Qwen/Qwen2.5-7B-Instruct")
+        self.model_name = self.config.get("verifier_model_name") or self.config.get(
+            "model_name", "Qwen/Qwen2.5-7B-Instruct"
+        )
         self.load_in_4bit = self.config.get("load_in_4bit", True)
         self.device_map = self.config.get("device_map", "auto")
-        self.uncertain_low = self.config.get("uncertain_low", 0.38)
-        self.uncertain_high = self.config.get("uncertain_high", 0.50)
-        self.keep_threshold = self.config.get("keep_threshold", 3)
-        self.batch_size = self.config.get("batch_size", 8)
-
+        self.batch_size = int(self.config.get("batch_size", 8))
+        self.max_new_tokens = int(self.config.get("verification_max_new_tokens", 96))
+        self.checkpoint_interval = max(
+            self.batch_size, int(self.config.get("verification_checkpoint_interval", 256))
+        )
         self._model = None
         self._tokenizer = None
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _prompt_content(han: str, viet: str) -> str:
+        return f"""Đánh giá một bead Hán–Việt theo độ ĐẦY ĐỦ NỘI DUNG, không chỉ theo độ tương đồng.
 
-    def _call_gemini(self, prompt: str, is_json: bool = False) -> str:
-        import requests
-        import os
-        import json
-        
-        # Load API keys
-        raw_key = self.config.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
-        if not raw_key:
-            raise ValueError(
-                "Gemini API key is missing. Please set GEMINI_API_KEY environment variable "
-                "or specify 'api_key' in config.py under qwen_verifier."
-            )
-            
-        if isinstance(raw_key, list):
-            keys = raw_key
-        else:
-            keys = [k.strip() for k in raw_key.split(",") if k.strip()]
-            
-        if not keys:
-            raise ValueError("No valid Gemini API keys found.")
-            
-        if not hasattr(self, "_current_key_idx") or self._current_key_idx >= len(keys):
-            self._current_key_idx = 0
-            
-        model = self.model_name
-        # Tăng số lượt thử lên gấp 5 lần số keys để có nhiều vòng xoay hơn
-        max_retries = len(keys) * 5
-        
-        # Lưu các key bị lỗi 403 vĩnh viễn để tránh lặp lại vô ích
-        bad_keys = set()
-        
-        for attempt in range(max_retries):
-            # Nếu tất cả các keys đều hỏng (403), dừng ngay lập tức
-            if len(bad_keys) >= len(keys):
-                raise ValueError("Tất cả các Gemini API Keys của bạn đều bị lỗi 403 (Forbidden). Vui lòng kiểm tra lại Kaggle Secrets.")
-                
-            api_key = keys[self._current_key_idx]
-            if api_key in bad_keys:
-                self._current_key_idx = (self._current_key_idx + 1) % len(keys)
-                continue
-                
-            # Cứ mỗi lần xoay hết một vòng toàn bộ các key, cho hệ thống nghỉ 15 giây để hồi lại quota 429
-            if attempt > 0 and attempt % len(keys) == 0:
-                print(f"[Gemini] Đã thử qua một vòng tất cả các key. Tạm dừng 15 giây để hồi lại hạn mức (quota)...")
-                time.sleep(15.0)
-                
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            headers = {'Content-Type': 'application/json'}
-            payload = {
-                "contents": [{
-                    "parts": [{"text": prompt}]
-                }],
-                "generationConfig": {
-                    "temperature": 0.0
-                }
-            }
-            if is_json:
-                payload["generationConfig"]["responseMimeType"] = "application/json"
-                
+Quy ước bắt buộc (xem tiếng Việt là bản dịch của Hán):
+- exact: hai phía tương ứng đầy đủ mọi ý, tên riêng, con số, quan hệ và phạm vi. Khác cách diễn đạt được phép; không được dư hay thiếu thông tin.
+- addition: phía Việt có nội dung thêm không xuất hiện trong Hán.
+- omission: phía Việt thiếu nội dung có trong Hán.
+- mismatch: nội dung chính khác nhau, lệch câu/block, hoặc vừa thêm vừa thiếu nên không thể coi là một bản dịch đầy đủ.
+
+Không được chấm exact nếu một câu chỉ chứa một phần nội dung của câu kia. Một chi tiết địa danh, chức tước, số liệu, hướng, khoảng cách hoặc mệnh đề bị dư/thiếu cũng là lỗi.
+
+HÁN: {han}
+VIỆT: {viet}
+
+Chỉ trả về một JSON object đúng schema sau, không markdown:
+{{"label":"exact|addition|omission|mismatch","extra_side":"none|han|viet|both","missing_side":"none|han|viet|both","confidence":0.0,"reason":"lý do ngắn"}}"""
+
+    def _build_prompt(self, han: str, viet: str) -> str:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Bạn là chuyên gia Hán Nôm, chuyên kiểm định parallel corpus theo "
+                    "từng bead. Ưu tiên tính đầy đủ nội dung và phải phân biệt addition, "
+                    "omission, mismatch với exact."
+                ),
+            },
+            {"role": "user", "content": self._prompt_content(han, viet)},
+        ]
+        return self._tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+    @staticmethod
+    def _parse_result(text: str) -> Dict[str, Any]:
+        """Parse one model response; malformed responses fail closed."""
+        clean = str(text or "").strip()
+        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\s*```$", "", clean)
+        payload: Dict[str, Any] = {}
+
+        match = re.search(r"\{.*\}", clean, flags=re.DOTALL)
+        if match:
+            candidate = re.sub(r",\s*([}\]])", r"\1", match.group(0))
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=30)
-                if response.status_code == 200:
-                    result = response.json()
-                    return result['candidates'][0]['content']['parts'][0]['text']
-                elif response.status_code == 429:
-                    old_idx = self._current_key_idx
-                    self._current_key_idx = (self._current_key_idx + 1) % len(keys)
-                    print(f"[Gemini] Key #{old_idx+1} bị hết hạn mức hoặc rate limit (429). Đang chuyển sang Key #{self._current_key_idx+1}...")
-                    time.sleep(1.0)
-                elif response.status_code == 403:
-                    old_idx = self._current_key_idx
-                    bad_keys.add(api_key)
-                    self._current_key_idx = (self._current_key_idx + 1) % len(keys)
-                    print(f"[Gemini] ⚠️ Lỗi 403 (Forbidden) với Key #{old_idx+1}. Key này không hợp lệ hoặc sai định dạng. Đã loại bỏ key này khỏi vòng xoay.")
-                else:
-                    old_idx = self._current_key_idx
-                    self._current_key_idx = (self._current_key_idx + 1) % len(keys)
-                    print(f"[Gemini] Key #{old_idx+1} trả về lỗi HTTP {response.status_code}. Đang xoay sang Key #{self._current_key_idx+1}...")
-                    time.sleep(1.0)
-            except Exception as e:
-                old_idx = self._current_key_idx
-                self._current_key_idx = (self._current_key_idx + 1) % len(keys)
-                print(f"[Gemini] Lỗi kết nối với Key #{old_idx+1}: {e}. Đang xoay sang Key #{self._current_key_idx+1}...")
+                decoded = json.loads(candidate)
+                if isinstance(decoded, dict):
+                    payload = decoded
+            except json.JSONDecodeError:
+                payload = {}
+
+        if payload:
+            raw_label = payload.get("label") or payload.get("result")
+        else:
+            label_match = re.search(
+                r"\b(exact|addition|omission|mismatch|match|correct|extra|missing|wrong|unrelated)\b",
+                clean,
+                flags=re.IGNORECASE,
+            )
+            raw_label = label_match.group(1) if label_match else "mismatch"
+
+        label = normalize_label(raw_label)
+        try:
+            confidence = float(payload.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence > 1.0 and confidence <= 100.0:
+            confidence /= 100.0
+        confidence = min(1.0, max(0.0, confidence))
+
+        valid_sides = {"none", "han", "viet", "both"}
+        extra_side = str(payload.get("extra_side", "none")).strip().lower()
+        missing_side = str(payload.get("missing_side", "none")).strip().lower()
+        if extra_side not in valid_sides:
+            extra_side = "none"
+        if missing_side not in valid_sides:
+            missing_side = "none"
+
+        return {
+            "label": label,
+            "extra_side": extra_side,
+            "missing_side": missing_side,
+            "confidence": confidence,
+            "reason": str(payload.get("reason", "model output could not be fully parsed"))[:500],
+            "raw_response": clean[:2000],
+        }
+
+    def _call_gemini(self, prompt: str) -> str:
+        import requests
+
+        raw_key = self.config.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
+        keys = raw_key if isinstance(raw_key, list) else str(raw_key).split(",")
+        keys = [str(key).strip() for key in keys if str(key).strip()]
+        if not keys:
+            raise ValueError("GEMINI_API_KEY is required for a Gemini verifier model.")
+
+        if not hasattr(self, "_current_key_idx"):
+            self._current_key_idx = 0
+        bad_keys = set()
+        for attempt in range(max(5, len(keys) * 5)):
+            if len(bad_keys) == len(keys):
+                break
+            key = keys[self._current_key_idx % len(keys)]
+            self._current_key_idx = (self._current_key_idx + 1) % len(keys)
+            if key in bad_keys:
+                continue
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{self.model_name}:generateContent?key={key}"
+            )
+            response = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.0,
+                        "responseMimeType": "application/json",
+                    },
+                },
+                timeout=60,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            if response.status_code == 403:
+                bad_keys.add(key)
+            elif response.status_code == 429:
+                time.sleep(2.0)
+            else:
                 time.sleep(1.0)
-                
-        raise ValueError("Không thể gọi Gemini API sau khi đã thử tất cả các key và áp dụng thời gian chờ (rate limit).")
+            if attempt and attempt % len(keys) == 0:
+                time.sleep(5.0)
+        raise ValueError("Gemini verification failed after rotating all configured API keys.")
 
     def _load_model(self):
-        """Lazy load Qwen model and tokenizer."""
-        if self.model_name.lower().startswith("gemini"):
-            return
-            
-        if self._model is not None:
+        if self.model_name.lower().startswith("gemini") or self._model is not None:
             return
 
-        print(f"[Qwen] Loading {self.model_name} (4-bit={self.load_in_4bit})...")
-        t0 = time.time()
-
+        print(f"[Completeness] Loading {self.model_name} (4-bit={self.load_in_4bit})...")
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -145,352 +184,197 @@ class QwenVerifier:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        model_kwargs = {"device_map": self.device_map}
+        model_kwargs: Dict[str, Any] = {"device_map": self.device_map}
         if self.load_in_4bit:
-            # Requires bitsandbytes and accelerate packages
             try:
-                import accelerate
-                import bitsandbytes
+                import accelerate  # noqa: F401
+                import bitsandbytes  # noqa: F401
                 from transformers import BitsAndBytesConfig
-                quantization_config = BitsAndBytesConfig(
+
+                model_kwargs["quantization_config"] = BitsAndBytesConfig(
                     load_in_4bit=True,
                     bnb_4bit_compute_dtype=torch.float16,
                     bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4"
+                    bnb_4bit_quant_type="nf4",
                 )
-                model_kwargs["quantization_config"] = quantization_config
             except ImportError:
-                print(
-                    "[Qwen] Warning: bitsandbytes or accelerate not installed. "
-                    "Attempting to load model without 4-bit quantization."
-                )
                 self.load_in_4bit = False
                 model_kwargs["torch_dtype"] = torch.float16
         else:
             model_kwargs["torch_dtype"] = torch.float16
 
         self._model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
-        print(f"[Qwen] Model loaded. ({time.time() - t0:.1f}s)")
 
-    def _build_prompt(self, han: str, viet: str) -> str:
-        """Create the zero-shot evaluation prompt for Qwen."""
-        system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam. Nhiệm vụ của bạn là đánh giá chất lượng dóng hàng để xây dựng tập dữ liệu song song sạch (Gold parallel corpus) cho dịch máy."
-        user_content = f"""Hãy đánh giá xem câu tiếng Việt và câu chữ Hán dưới đây có phải là bản dịch sạch, khớp thông tin 1-1 trực tiếp hay không.
-Chỉ trả lời bằng duy nhất một chữ số từ 0 đến 5, không giải thích gì thêm:
-  5: Dịch chính xác, đầy đủ nghĩa, khớp thông tin trực tiếp 1-1, KHÔNG có chú thích dịch giả hay từ ngữ giải nghĩa thêm.
-  4: Dịch đúng thông tin cốt lõi, khớp trực tiếp, có thể thừa/thiếu một vài trợ từ không quan trọng.
-  3: Dịch đúng nhưng chứa thông tin thừa do dịch giả chú thích thêm trong ngoặc đơn (ví dụ: chú thích năm dương lịch, chú thích chữ Hán phụ) mà bản Hán gốc không có.
-  2: Dịch thiếu rất nhiều thông tin cốt lõi hoặc chứa quá nhiều văn bản diễn giải dài dòng của dịch giả.
-  1: Rất ít liên quan về mặt nội dung.
-  0: Hoàn toàn không liên quan hoặc là hai câu khác nhau.
+    @staticmethod
+    def _apply_result(pair: Dict[str, Any], result: Dict[str, Any]) -> None:
+        label = normalize_label(result.get("label"))
+        pair["completeness_label"] = label
+        pair["extra_side"] = result.get("extra_side", "none")
+        pair["missing_side"] = result.get("missing_side", "none")
+        pair["verification_confidence"] = result.get("confidence", 0.0)
+        pair["verification_reason"] = result.get("reason", "")
+        pair["verification_raw_response"] = result.get("raw_response", "")
+        pair["verified"] = label == "exact"
+        pair["status"] = "accepted" if label == "exact" else label
+        # Compatibility only. Numeric scores are no longer an acceptance gate.
+        pair["qwen_score"] = 5 if label == "exact" else 0
 
-LƯU Ý QUAN TRỌNG: Để phục vụ huấn luyện dịch máy (Machine Translation), chúng ta cần tránh dữ liệu rác (hallucination). Vì vậy, các câu tiếng Việt có chứa chú thích của dịch giả trong ngoặc đơn hoặc diễn giải thêm mà bản Hán không có phải bị chấm điểm thấp (chấm 3 hoặc 2) để hệ thống tự động loại bỏ.
-
-Câu Hán: {han}
-Câu Việt: {viet}
-
-Điểm số:"""
-
-        # Format prompt using Qwen Chat Template
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ]
-        return self._tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-
-    def _parse_score(self, text: str) -> int:
-        """Extract a single integer score (0-5) from Qwen's response."""
-        text_clean = text.strip()
-        # Look for a digit at the very beginning of the response first
-        match_start = re.match(r"^([0-5])", text_clean)
-        if match_start:
-            return int(match_start.group(1))
-            
-        # Fallback search for any digit in the response, prefer the first one
-        match = re.search(r"\b([0-5])\b", text_clean)
-        if match:
-            return int(match.group(1))
-        # Fallback search for any digit
-        match_any = re.search(r"(\d)", text_clean)
-        if match_any:
-            val = int(match_any.group(1))
-            return min(max(val, 0), 5)
-        # Default fallback to 0 (reject if LLM output is garbled)
-        return 0
-
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _save_checkpoint(path: Optional[str], records: List[Dict[str, Any]]) -> None:
+        if not path:
+            return
+        temporary = f"{path}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(records, handle, ensure_ascii=False, indent=2)
+        os.replace(temporary, path)
 
     def verify(
-        self, aligned_pairs: List[Dict[str, Any]], cache_path: Optional[str] = None
+        self,
+        aligned_pairs: List[Dict[str, Any]],
+        cache_path: Optional[str] = None,
+        force: bool = False,
     ) -> List[Dict[str, Any]]:
-        """
-        Verify aligned pairs. Filter out candidates based on Qwen's score.
-
-        Args:
-            aligned_pairs: List of dicts representing aligned pairs. Each must contain:
-                           "han_sentence", "viet_sentence", "similarity_score"
-            cache_path:    Optional path to save intermediate/final Phase 2 JSON output.
-
-        Returns:
-            List of dicts with additional keys:
-               "qwen_score": int (0-5) or None (if skipped)
-               "verified": bool (True/False)
-        """
+        """Classify every two-sided bead that has not already been classified."""
         if not aligned_pairs:
             return []
 
-        # Check if cache_path exists and load it to resume progress
-        import os
-        import json
         if cache_path and os.path.exists(cache_path):
-            print(f"[Cache] Found Phase 2 checkpoint/cached verification at: {cache_path}")
             try:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    cached_data = json.load(f)
-                if cached_data:
-                    # Map cached verification status back to aligned_pairs
-                    cache_map = {}
-                    for item in cached_data:
-                        k = (item.get("han_sentence", ""), item.get("viet_sentence", ""))
-                        if item.get("qwen_score") is not None:
-                            cache_map[k] = (item["qwen_score"], item["verified"])
-                    
-                    mapped_count = 0
-                    for pair in aligned_pairs:
-                        k = (pair.get("han_sentence", ""), pair.get("viet_sentence", ""))
-                        if k in cache_map:
-                            pair["qwen_score"], pair["verified"] = cache_map[k]
-                            mapped_count += 1
-                    print(f"[Cache] Successfully loaded Phase 2 checkpoint. Resumed {mapped_count} pairs.")
-            except Exception as e:
-                print(f"[Cache] Warning: Failed to load Phase 2 checkpoint: {e}")
+                with open(cache_path, "r", encoding="utf-8") as handle:
+                    cached = json.load(handle)
+                cache_map = {
+                    bead_key(item): item
+                    for item in cached
+                    if item.get("completeness_label") in COMPLETENESS_LABELS
+                }
+                for pair in aligned_pairs:
+                    cached_pair = cache_map.get(bead_key(pair))
+                    if cached_pair:
+                        for field in (
+                            "completeness_label", "extra_side", "missing_side",
+                            "verification_confidence", "verification_reason",
+                            "verification_raw_response", "verified", "status", "qwen_score",
+                        ):
+                            if field in cached_pair:
+                                pair[field] = cached_pair[field]
+                print(f"[Completeness] Resumed {len(cache_map)} classified beads from checkpoint.")
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                print(f"[Completeness] Ignoring unreadable checkpoint: {error}")
 
-        # Find pairs that need verification (score in the uncertain range and not yet verified)
-        uncertain_pairs_indices = []
-        for idx, pair in enumerate(aligned_pairs):
-            if pair.get("qwen_score") is not None:
+        pending: List[int] = []
+        for index, pair in enumerate(aligned_pairs):
+            if not has_text(pair.get("han_sentence")) or not has_text(pair.get("viet_sentence")):
+                pair["completeness_label"] = "unmatched"
+                pair["verified"] = False
+                pair["status"] = "unmatched"
                 continue
-            score = pair.get("similarity_score", 0.0)
-            # Only verify if both sentences are non-empty
-            if not pair.get("han_sentence", "").strip() or not pair.get("viet_sentence", "").strip():
-                continue
-            if self.uncertain_low <= score <= self.uncertain_high:
-                uncertain_pairs_indices.append(idx)
+            if force or pair.get("completeness_label") not in COMPLETENESS_LABELS:
+                pending.append(index)
 
-        total_uncertain = len(uncertain_pairs_indices)
         print(
-            f"[Qwen] Found {total_uncertain}/{len(aligned_pairs)} pairs "
-            f"in uncertainty band [{self.uncertain_low}, {self.uncertain_high}]."
+            f"[Completeness] Verifying {len(pending)}/{len(aligned_pairs)} two-sided beads; "
+            "no similarity-based auto-accept is allowed."
         )
-
-        # Initialize all as verified (default) and qwen_score as None (skipped) only if not set
-        for pair in aligned_pairs:
-            if "qwen_score" not in pair:
-                pair["qwen_score"] = None
-            if "verified" not in pair:
-                pair["verified"] = True
-
-        if total_uncertain == 0:
-            print("[Qwen] No pairs need LLM verification. Skipping Qwen Phase 2.")
+        if not pending:
             return aligned_pairs
 
-        # Load Qwen model (lazily) if not Gemini
         is_gemini = self.model_name.lower().startswith("gemini")
-        if not is_gemini:
-            self._load_model()
-
-        t0 = time.time()
-        processed = 0
-
         if is_gemini:
-            print(f"[Gemini] Running verification sequentially (with 2.0s sleep to avoid rate limits)...")
-            for idx in uncertain_pairs_indices:
-                pair = aligned_pairs[idx]
-                system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam. Nhiệm vụ của bạn là đánh giá chất lượng dóng hàng để xây dựng tập dữ liệu song song sạch (Gold parallel corpus) cho dịch máy."
-                user_content = f"""Hãy đánh giá xem câu tiếng Việt và câu chữ Hán dưới đây có phải là bản dịch sạch, khớp thông tin 1-1 trực tiếp hay không.
-Chỉ trả lời bằng duy nhất một chữ số từ 0 đến 5, không giải thích gì thêm:
-  5: Dịch chính xác, đầy đủ nghĩa, khớp thông tin trực tiếp 1-1, KHÔNG có chú thích dịch giả hay từ ngữ giải nghĩa thêm.
-  4: Dịch đúng thông tin cốt lõi, khớp trực tiếp, có thể thừa/thiếu một vài trợ từ không quan trọng.
-  3: Dịch đúng nhưng chứa thông tin thừa do dịch giả chú thích thêm trong ngoặc đơn (ví dụ: chú thích năm dương lịch, chú thích chữ Hán phụ) mà bản Hán gốc không có.
-  2: Dịch thiếu rất nhiều thông tin cốt lõi hoặc chứa quá nhiều văn bản diễn giải dài dòng của dịch giả.
-  1: Rất ít liên quan về mặt nội dung.
-  0: Hoàn toàn không liên quan hoặc là hai câu khác nhau.
+            for done, index in enumerate(pending, 1):
+                pair = aligned_pairs[index]
+                response = self._call_gemini(
+                    self._prompt_content(pair["han_sentence"], pair["viet_sentence"])
+                )
+                self._apply_result(pair, self._parse_result(response))
+                if done % 50 == 0 or done == len(pending):
+                    print(f"[Completeness] Processed {done}/{len(pending)} beads...")
+                if done % self.checkpoint_interval == 0 or done == len(pending):
+                    self._save_checkpoint(cache_path, aligned_pairs)
+            return aligned_pairs
 
-LƯU Ý QUAN TRỌNG: Để phục vụ huấn luyện dịch máy (Machine Translation), chúng ta cần tránh dữ liệu rác (hallucination). Vì vậy, các câu tiếng Việt có chứa chú thích của dịch giả trong ngoặc đơn hoặc diễn giải thêm mà bản Hán không có phải bị chấm điểm thấp (chấm 3 hoặc 2) để hệ thống tự động loại bỏ.
+        self._load_model()
+        import torch
 
-Câu Hán: {pair["han_sentence"]}
-Câu Việt: {pair["viet_sentence"]}
-
-Điểm số:"""
-                prompt = f"{system_content}\n\n{user_content}"
-                response_text = self._call_gemini(prompt, is_json=False)
-                score = self._parse_score(response_text)
-
-                if idx in uncertain_pairs_indices[:5]:
-                    print(f"[Gemini Debug] Cặp #{idx}:")
-                    print(f"  Hán:  {repr(pair['han_sentence'])}")
-                    print(f"  Việt: {repr(pair['viet_sentence'])}")
-                    print(f"  Raw:  {repr(response_text)} -> Score parsed: {score}")
-
-                aligned_pairs[idx]["qwen_score"] = score
-                aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
-                
-                # Save progress to checkpoint
-                if cache_path:
-                    try:
-                        with open(cache_path, "w", encoding="utf-8") as f:
-                            json.dump(aligned_pairs, f, ensure_ascii=False, indent=2)
-                    except Exception as e:
-                        pass
-
-                processed += 1
-                if processed < total_uncertain:
-                    time.sleep(2.0)
-            print(f"[Gemini] Processed {processed}/{total_uncertain} uncertain pairs...")
-        else:
-            print(f"[Qwen] Running batch verification (batch_size={self.batch_size})...")
-            # Batch processing
-            for batch_start in range(0, total_uncertain, self.batch_size):
-                batch_indices = uncertain_pairs_indices[batch_start : batch_start + self.batch_size]
-                prompts = []
-                for idx in batch_indices:
-                    pair = aligned_pairs[idx]
-                    prompts.append(self._build_prompt(pair["han_sentence"], pair["viet_sentence"]))
-
-                import torch
-                try:
-                    # Tokenize batch
-                    inputs = self._tokenizer(prompts, return_tensors="pt", padding=True).to(self._model.device)
-
-                    # Generate
+        processed = 0
+        for start in range(0, len(pending), self.batch_size):
+            batch_indices = pending[start : start + self.batch_size]
+            prompts = [
+                self._build_prompt(
+                    aligned_pairs[index]["han_sentence"],
+                    aligned_pairs[index]["viet_sentence"],
+                )
+                for index in batch_indices
+            ]
+            try:
+                inputs = self._tokenizer(prompts, return_tensors="pt", padding=True).to(
+                    self._model.device
+                )
+                with torch.no_grad():
+                    outputs = self._model.generate(
+                        **inputs,
+                        max_new_tokens=self.max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=self._tokenizer.eos_token_id,
+                    )
+                input_length = inputs.input_ids.shape[1]
+                for row, index in enumerate(batch_indices):
+                    response = self._tokenizer.decode(
+                        outputs[row][input_length:], skip_special_tokens=True
+                    )
+                    self._apply_result(aligned_pairs[index], self._parse_result(response))
+            except RuntimeError as error:
+                if "out of memory" not in str(error).lower() or len(batch_indices) == 1:
+                    raise
+                print("[Completeness] Batch OOM; retrying this batch one bead at a time.")
+                torch.cuda.empty_cache()
+                for index in batch_indices:
+                    prompt = self._build_prompt(
+                        aligned_pairs[index]["han_sentence"],
+                        aligned_pairs[index]["viet_sentence"],
+                    )
+                    inputs = self._tokenizer([prompt], return_tensors="pt").to(self._model.device)
                     with torch.no_grad():
-                        outputs = self._model.generate(
+                        output = self._model.generate(
                             **inputs,
-                            max_new_tokens=15,
-                            do_sample=False,  # deterministic greedy decoding for rating
+                            max_new_tokens=self.max_new_tokens,
+                            do_sample=False,
                             pad_token_id=self._tokenizer.eos_token_id,
                         )
+                    response = self._tokenizer.decode(
+                        output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True
+                    )
+                    self._apply_result(aligned_pairs[index], self._parse_result(response))
 
-                    # Decode responses
-                    input_len = inputs.input_ids.shape[1]
-                    for i, idx in enumerate(batch_indices):
-                        response_tokens = outputs[i][input_len:]
-                        response_text = self._tokenizer.decode(response_tokens, skip_special_tokens=True)
-                        score = self._parse_score(response_text)
+            processed += len(batch_indices)
+            print(f"[Completeness] Processed {processed}/{len(pending)} beads...")
+            if (
+                processed % self.checkpoint_interval == 0
+                or processed == len(pending)
+            ):
+                self._save_checkpoint(cache_path, aligned_pairs)
 
-                        # In log debug cho 5 cặp đầu tiên của đợt xác thực
-                        if idx in uncertain_pairs_indices[:5]:
-                            print(f"[Qwen Debug] Cặp #{idx}:")
-                            print(f"  Hán:  {repr(aligned_pairs[idx]['han_sentence'])}")
-                            print(f"  Việt: {repr(aligned_pairs[idx]['viet_sentence'])}")
-                            print(f"  Raw:  {repr(response_text)} -> Score parsed: {score}")
-
-                        # Set results
-                        aligned_pairs[idx]["qwen_score"] = score
-                        aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
-
-                    # Save progress to checkpoint
-                    if cache_path:
-                        try:
-                            with open(cache_path, "w", encoding="utf-8") as f:
-                                json.dump(aligned_pairs, f, ensure_ascii=False, indent=2)
-                        except Exception as e:
-                            pass
-
-                except RuntimeError as e:
-                    if "CUDA out of memory" in str(e):
-                        print(f"[Qwen] Warning: CUDA Out of Memory with batch_size={len(prompts)}. Falling back to sequential execution (batch_size=1) for this batch...")
-                        torch.cuda.empty_cache()
-                        
-                        # Process sequentially
-                        for idx in batch_indices:
-                            pair = aligned_pairs[idx]
-                            p_prompt = self._build_prompt(pair["han_sentence"], pair["viet_sentence"])
-                            p_inputs = self._tokenizer([p_prompt], return_tensors="pt").to(self._model.device)
-                            
-                            try:
-                                with torch.no_grad():
-                                    p_outputs = self._model.generate(
-                                        **p_inputs,
-                                        max_new_tokens=15,
-                                        do_sample=False,
-                                        pad_token_id=self._tokenizer.eos_token_id,
-                                    )
-                                p_input_len = p_inputs.input_ids.shape[1]
-                                p_response_tokens = p_outputs[0][p_input_len:]
-                                p_response_text = self._tokenizer.decode(p_response_tokens, skip_special_tokens=True)
-                                score = self._parse_score(p_response_text)
-                                
-                                # In log debug cho chế độ tuần tự nếu thuộc 5 cặp đầu tiên
-                                if idx in uncertain_pairs_indices[:5]:
-                                    print(f"[Qwen Seq Debug] Cặp #{idx}:")
-                                    print(f"  Hán:  {repr(pair['han_sentence'])}")
-                                    print(f"  Việt: {repr(pair['viet_sentence'])}")
-                                    print(f"  Raw:  {repr(p_response_text)} -> Score parsed: {score}")
-                                
-                                aligned_pairs[idx]["qwen_score"] = score
-                                aligned_pairs[idx]["verified"] = (score >= self.keep_threshold)
-                                
-                                # Save progress to checkpoint
-                                if cache_path:
-                                    try:
-                                        with open(cache_path, "w", encoding="utf-8") as f:
-                                            json.dump(aligned_pairs, f, ensure_ascii=False, indent=2)
-                                    except Exception as e:
-                                        pass
-                            except RuntimeError as p_e:
-                                if "CUDA out of memory" in str(p_e):
-                                    print("[Qwen] Critical: CUDA Out of Memory even with batch_size=1! Skipping verification for this pair.")
-                                    torch.cuda.empty_cache()
-                                    aligned_pairs[idx]["qwen_score"] = 0
-                                    aligned_pairs[idx]["verified"] = False
-                                else:
-                                    raise p_e
-                    else:
-                        raise e
-
-                processed += len(batch_indices)
-                print(f"[Qwen] Processed {processed}/{total_uncertain} uncertain pairs...")
-
-        # Summarize results
-        kept = sum(1 for idx in uncertain_pairs_indices if aligned_pairs[idx]["verified"])
-        rejected = total_uncertain - kept
-        print(
-            f"[Qwen] Phase 2 Verification complete in {time.time() - t0:.1f}s. "
-            f"Kept: {kept}, Rejected (score < {self.keep_threshold}): {rejected}."
+        exact = sum(
+            pair.get("completeness_label") == "exact" for pair in aligned_pairs
         )
-
+        print(f"[Completeness] Verification complete: {exact} exact beads.")
         return aligned_pairs
 
     def free_gpu_memory(self):
-        """Giải phóng mô hình Qwen khỏi VRAM để tránh CUDA OOM cho các quyển sau."""
         import gc
-        print("[Qwen] Releasing verifier model from GPU VRAM...")
+
         if self._model is not None:
             try:
                 self._model.cpu()
             except Exception:
                 pass
-            del self._model
             self._model = None
-            
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-            
+        self._tokenizer = None
         gc.collect()
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-                allocated = torch.cuda.memory_allocated() / 1024**3
-                print(f"[Qwen] GPU memory after cleanup: {allocated:.2f}GB")
         except ImportError:
             pass

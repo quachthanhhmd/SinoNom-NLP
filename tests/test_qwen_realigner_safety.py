@@ -32,3 +32,11 @@ def test_plain_text_or_out_of_range_reference_is_rejected():
 
 def test_backtracking_reference_order_is_rejected():
     assert parse('[{"han":"H2","viet":"V1"},{"han":"H1","viet":"V2"}]') is None
+
+
+def test_prompt_example_never_uses_nonexistent_reference():
+    example = QwenRealigner._build_example_json(1, 2)
+    assert '"H1"' in example
+    assert '"V2"' in example
+    assert '"H2"' not in example
+    assert '"V3"' not in example

@@ -255,6 +255,19 @@ class QwenRealigner:
     # Prompt builder
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _build_example_json(num_han: int, num_viet: int) -> str:
+        """Return a schema example that never cites a nonexistent H/V ID."""
+        example = []
+        paired = min(num_han, num_viet)
+        for index in range(paired):
+            example.append({"han": f"H{index + 1}", "viet": f"V{index + 1}"})
+        for index in range(paired, num_han):
+            example.append({"han": f"H{index + 1}", "viet": None})
+        for index in range(paired, num_viet):
+            example.append({"han": None, "viet": f"V{index + 1}"})
+        return json.dumps(example, ensure_ascii=False, indent=2)
+
     def _build_realign_prompt(self, han_sentences: List[str], viet_sentences: List[str]) -> str:
         num_han = len(han_sentences)
         num_viet = len(viet_sentences)
@@ -267,27 +280,11 @@ class QwenRealigner:
             "về Đại Nam Nhất Thống Chí."
         )
         
-        # Build dynamic example JSON based on the count of Viet sentences
-        if num_viet == 1:
-            example_json = (
-                f"[\n"
-                f"  {{\"han\": \"H1+H2\", \"viet\": \"V1\"}},\n"
-                f"  {{\"han\": \"H3\", \"viet\": null}}\n"
-                f"]"
-            )
-        else:
-            example_json = (
-                f"[\n"
-                f"  {{\"han\": \"H1\", \"viet\": \"V1\"}},\n"
-                f"  {{\"han\": \"H2+H3\", \"viet\": \"V2\"}},\n"
-                f"  {{\"han\": \"H4\", \"viet\": null}},\n"
-                f"  {{\"han\": null, \"viet\": \"V{num_viet}\"}}\n"
-                f"]"
-            )
+        example_json = self._build_example_json(num_han, num_viet)
 
         user_content = f"""Dưới đây là các câu chữ Hán cổ và các câu dịch tiếng Việt tương ứng bị lệch pha (không được dóng hàng đúng chỗ).
 
-Nhiệm vụ của bạn: Dóng hàng lại các câu Hán và Việt dưới đây một cách CHÍNH XÁC NHẤT.
+Nhiệm vụ của bạn: tạo được NHIỀU BEAD EXACT NHẤT CÓ THỂ. Mỗi bead phải tương ứng đầy đủ nội dung; bead có addition hoặc omission là sai.
 
 QUY TẮC BẮT BUỘC:
 1. Chỉ được dùng các mã Hán từ H1 đến H{num_han} và các mã Việt từ V1 đến V{num_viet} (dựa theo danh sách CÁC CÂU HÁN và CÁC CÂU VIỆT bên dưới).
@@ -298,6 +295,8 @@ QUY TẮC BẮT BUỘC:
 6. Nếu một câu Hán không tìm được câu Việt phù hợp, đặt "viet": null.
 7. Nếu một câu Việt không tìm được câu Hán phù hợp, đặt "han": null.
 8. Trả lời ĐÚNG định dạng JSON, không giải thích thêm.
+9. Được phép ghép m-n để sửa lệch boundary. Chỉ ghép các mã liên tiếp và không ghép thêm nội dung không tương ứng.
+10. Thà đặt null phần chưa chắc chắn còn hơn tạo một bead chỉ khớp một phần.
 
 CÁC CÂU HÁN:
 {han_numbered}
@@ -437,6 +436,7 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                     "viet_indices": resolved_viet_indices,
                     "confidence": 0.0,
                     "status": "review" if (han_text and viet_text) else "unmatched",
+                    "completeness_label": None if (han_text and viet_text) else "unmatched",
                 })
 
         if used_han_refs != list(range(len(han_sentences))):
@@ -566,8 +566,11 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                 if v and v.lower() != "nan":
                     cluster_viet_indices.append(item.get("viet_indices", []))
 
-            # Proportional slicing for large clusters to prevent VRAM OOM (Qwen limit=12, Gemini safety limit=30 to maintain reasoning accuracy)
-            limit = 30 if is_gemini else 12
+            # Gemini can inspect a wider local block without VRAM pressure. The
+            # checked corpus has 99%+ of unresolved clusters within 60 source
+            # rows; handling that window directly recovers substantially more
+            # exact beads without reintroducing unsafe proportional slicing.
+            limit = 60 if is_gemini else 12
             if len(cluster_han) > limit or len(cluster_viet) > limit:
                 print(
                     f"[QwenRealign] Cluster [{cluster_start}:{cluster_end}] exceeds the safe "
@@ -589,27 +592,12 @@ Ví dụ kết quả dóng hàng mong muốn cho cụm này (JSON array):
                     han_numbered = "\n".join(f"  H{i+1}: {s}" for i, s in enumerate(sub_han))
                     viet_numbered = "\n".join(f"  V{j+1}: {s}" for j, s in enumerate(sub_viet))
 
-                    if num_viet == 1:
-                        example_json = (
-                            f"[\n"
-                            f"  {{\"han\": \"H1+H2\", \"viet\": \"V1\"}},\n"
-                            f"  {{\"han\": \"H3\", \"viet\": null}}\n"
-                            f"]"
-                        )
-                    else:
-                        example_json = (
-                            f"[\n"
-                            f"  {{\"han\": \"H1\", \"viet\": \"V1\"}},\n"
-                            f"  {{\"han\": \"H2+H3\", \"viet\": \"V2\"}},\n"
-                            f"  {{\"han\": \"H4\", \"viet\": null}},\n"
-                            f"  {{\"han\": null, \"viet\": \"V{num_viet}\"}}\n"
-                            f"]"
-                        )
+                    example_json = self._build_example_json(num_han, num_viet)
 
                     system_content = "Bạn là chuyên gia Hán Nôm và dịch thuật cổ văn Việt Nam với kinh nghiệm sâu rộng về Đại Nam Nhất Thống Chí."
                     user_content = f"""Dưới đây là các câu chữ Hán cổ và các câu dịch tiếng Việt tương ứng bị lệch pha (không được dóng hàng đúng chỗ).
 
-Nhiệm vụ của bạn: Dóng hàng lại các câu Hán và Việt dưới đây một cách CHÍNH XÁC NHẤT.
+Nhiệm vụ của bạn: tạo được NHIỀU BEAD EXACT NHẤT CÓ THỂ. Mỗi bead phải tương ứng đầy đủ nội dung; bead có addition hoặc omission là sai.
 
 QUY TẮC BẮT BUỘC:
 1. Chỉ được dùng các mã Hán từ H1 đến H{num_han} và các mã Việt từ V1 đến V{num_viet} (dựa theo danh sách CÁC CÂU HÁN và CÁC CÂU VIỆT bên dưới).
@@ -620,6 +608,8 @@ QUY TẮC BẮT BUỘC:
 6. Nếu một câu Hán không tìm được câu Việt phù hợp, đặt "viet": null.
 7. Nếu một câu Việt không tìm được câu Hán phù hợp, đặt "han": null.
 8. Trả lời ĐÚNG định dạng JSON, không giải thích thêm.
+9. Được phép ghép m-n để sửa lệch boundary. Chỉ ghép các mã liên tiếp và không ghép thêm nội dung không tương ứng.
+10. Thà đặt null phần chưa chắc chắn còn hơn tạo một bead chỉ khớp một phần.
 
 CÁC CÂU HÁN:
 {han_numbered}

@@ -16,10 +16,15 @@ Các finding bên dưới mô tả baseline đã tạo artifact cũ. Production 
 - nhận diện q8/q9 theo nội dung/manifest và tách 10→11, 16→17 theo heading thật, không theo prefix ID;
 - cache theo fingerprint input/config/schema và Phase 3 final không bị xử lý lại;
 - Phase 3 chỉ chấp nhận reference hợp lệ, đủ coverage, duy nhất, liên tiếp và đơn điệu; cụm quá lớn/invalid được giữ để review;
-- export tách `accepted`, `review`, `unmatched`, giữ provenance; downstream chỉ đọc accepted và deduplicate;
-- regression suite hiện có 13 test cho decoder, invariant, boundary, ordering, segmentation và LLM parser.
+- Phase 2 mới kiểm tra **mọi bead hai phía**, không auto-accept theo similarity, và gán nhãn `exact/addition/omission/mismatch` theo rubric addition/omission chính thức;
+- bead chưa exact được hoàn nguyên về từng source row nguyên tử, sau đó Phase 3 lặp tối đa ba vòng: redraw m-n → verify completeness → giữ exact làm anchor; vòng lặp dừng khi không tăng exact;
+- export tách `exact_accepted`, `addition`, `omission`, `mismatch`, `review`, `unmatched`, giữ provenance; downstream chỉ đọc `*_exact_accepted.tsv` và deduplicate;
+- mỗi quyển có evaluation report và sample workbook cố định 30 bead để đánh giá độc lập theo quy tắc lỗi vượt 1/3;
+- regression suite hiện có 20 test cho decoder, invariant, boundary, ordering, segmentation, LLM parser, completeness routing và exact-only export gate.
 
-Việc sửa code **không biến artifact `HVB_001_parallel.xlsx` cũ thành đúng**. Cần chạy lại pipeline để tạo corpus phiên bản mới, sau đó đánh giá trên gold sample trước khi khẳng định tỷ lệ đúng thực tế.
+Đợt Kaggle chạy sau remediation đầu tiên đã chứng minh structural invariant được giữ nhưng chưa đạt semantic gate: 21.271 record chỉ tạo 5.004 dòng mang trạng thái accepted, trong khi **0/5.004 dòng đó được Qwen kiểm tra completeness** vì verifier cũ chỉ xét vùng similarity `[0,32; 0,50]`. Khoảng 75,9% record còn unmatched. Vì vậy artifact đó không được dùng để train/nộp; đây là lý do của remediation `exact-v1` ở trên.
+
+Việc sửa code **không biến artifact `HVB_001_parallel.xlsx` cũ thành đúng** và chưa thể tự tạo ra con số exact mới khi chưa chạy model. Cần chạy lại từ Phase 2 (Phase 1 fingerprint cache được tái sử dụng), sau đó hoàn tất sample audit độc lập trước khi khẳng định tỷ lệ đúng thực tế.
 
 ## 1. Executive summary
 

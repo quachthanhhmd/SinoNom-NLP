@@ -48,6 +48,14 @@ You can set default API keys and paths in a `.env` file in the root directory:
 ```env
 GEMINI_API_KEY="your_api_key_here"
 ```
-*(Note: API keys are optional for the canonical local OCR and Phase-1 semantic alignment. Phase 3 requires the configured Gemini API model unless a local realigner model is selected.)*
+*(API keys are optional for OCR, Phase 1 and Phase 2. Phase 3 uses Gemini when `GEMINI_API_KEY` is available and otherwise falls back to the local Qwen model; Gemini is recommended for recovering more exact beads.)*
 
-For the checked-in `dataset/MAPPING` corpus, use `run_mapping.py`. New outputs are separated into `*_accepted.tsv`, `*_review.tsv`, and `*_unmatched.tsv`; only the accepted partition is consumed by `scripts/prepare_data.py`. Existing `HVB_001_parallel.*` files are audit baselines and are not rewritten automatically.
+For the checked-in `dataset/MAPPING` corpus, run:
+
+```bash
+python run_mapping.py --aligner ensemble --qwen --realign --repair-rounds 3
+```
+
+Phase 2 checks every two-sided bead using the strict `exact/addition/omission/mismatch` rubric. Phase 3 restores rejected merges to atomic source rows and iteratively redraws local m-n boundaries; exact beads become immutable anchors. The existing fingerprinted Phase-1 embedding cache is reused.
+
+Only `*_exact_accepted.tsv` is consumed by `scripts/prepare_data.py`. Diagnostic partitions include `*_addition.tsv`, `*_omission.tsv`, `*_mismatch.tsv`, `*_review.tsv`, `*_unmatched.tsv`, an evaluation report, and a deterministic independent-review sample workbook. Existing `HVB_001_parallel.*` files remain audit baselines until the new pipeline is rerun.

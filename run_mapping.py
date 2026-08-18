@@ -7,10 +7,12 @@ import json
 from typing import List, Dict, Tuple
 from nlp.aligner import EmbeddingSentenceAligner, EnsembleSentenceAligner
 from nlp.alignment_core import validate_alignment_records
+from nlp.bead_quality import quality_counts, split_non_exact_for_repair
 from utils.exporters import CorpusExporter, clean_vietnamese_text
 from utils.source_boundaries import split_merged_sino_rows
 
 PIPELINE_CACHE_VERSION = "monotonic-mn-v2"
+COMPLETENESS_CACHE_VERSION = "exact-v1"
 
 
 def detect_separator(file_path: str) -> str:
@@ -149,7 +151,8 @@ def process_alignment_group(
     exporter: CorpusExporter,
     work_code: str,
     qwen_enabled: bool = False,
-    realign_enabled: bool = False
+    realign_enabled: bool = False,
+    repair_rounds: int = 3,
 ):
     vols_str = ", ".join([f"Quyển {f[0]} ({os.path.basename(f[1])})" for f in sino_files])
     print(f"\n=========================================================================")
@@ -258,10 +261,28 @@ def process_alignment_group(
         {"ensemble": ENSEMBLE_CONFIG, "volumes": [volume for volume, _ in sino_files]},
     )
     phase1_cache = os.path.join(cache_dir, f"{group_key}_{fingerprint}_phase1.json")
-    phase2_cache = os.path.join(cache_dir, f"{group_key}_{fingerprint}_phase2.json")
-    phase3_cache = os.path.join(cache_dir, f"{group_key}_{fingerprint}_phase3.json")
+    exact_suffix = COMPLETENESS_CACHE_VERSION
+    phase2_cache = os.path.join(
+        cache_dir, f"{group_key}_{fingerprint}_phase2_{exact_suffix}.json"
+    )
+    phase2_checkpoint = os.path.join(
+        cache_dir, f"{group_key}_{fingerprint}_phase2_{exact_suffix}_checkpoint.json"
+    )
+    phase3_cache = os.path.join(
+        cache_dir,
+        f"{group_key}_{fingerprint}_phase3_{exact_suffix}_r{repair_rounds}.json",
+    )
+    phase2_rejection_cache = os.path.join(
+        cache_dir, f"{group_key}_{fingerprint}_phase2_{exact_suffix}_rejections.json"
+    )
+    phase3_rejection_cache = os.path.join(
+        cache_dir,
+        f"{group_key}_{fingerprint}_phase3_{exact_suffix}_r{repair_rounds}_rejections.json",
+    )
     
     raw_aligned = None
+    rejected_candidates = []
+    verifier = None
     run_phase1 = True
     run_phase2 = True
     run_phase3 = True
@@ -275,6 +296,9 @@ def process_alignment_group(
         run_phase1 = False
         run_phase2 = False
         run_phase3 = False
+        if os.path.exists(phase3_rejection_cache):
+            with open(phase3_rejection_cache, "r", encoding="utf-8") as f:
+                rejected_candidates = json.load(f)
     elif os.path.exists(phase2_cache):
         print(f"[Cache] Found Phase 2 cached alignment at: {phase2_cache}")
         print(f"[Cache] Loading cache to skip Phase 1 and Phase 2 computation...")
@@ -282,6 +306,9 @@ def process_alignment_group(
             raw_aligned = json.load(f)
         run_phase1 = False
         run_phase2 = False
+        if os.path.exists(phase2_rejection_cache):
+            with open(phase2_rejection_cache, "r", encoding="utf-8") as f:
+                rejected_candidates = json.load(f)
     elif os.path.exists(phase1_cache):
         print(f"[Cache] Found Phase 1 cached alignment at: {phase1_cache}")
         print(f"[Cache] Loading cache to skip Phase 1 computation...")
@@ -299,76 +326,116 @@ def process_alignment_group(
             json.dump(raw_aligned, f, ensure_ascii=False, indent=2)
         print(f"[Cache] Saved Phase 1 alignment cache to: {phase1_cache}")
     
-    # 3.5 Phase 2: Qwen LLM Verification
+    # 3.5 Phase 2: strict completeness verification of every two-sided bead.
     qwen_conf = ENSEMBLE_CONFIG.get("qwen_verifier", {})
-    if isinstance(aligner, EnsembleSentenceAligner) and qwen_enabled and qwen_conf.get("enabled", True) and run_phase2:
+    verification_enabled = qwen_enabled or realign_enabled
+    if (
+        isinstance(aligner, EnsembleSentenceAligner)
+        and verification_enabled
+        and qwen_conf.get("enabled", True)
+        and run_phase2
+    ):
         # Giải phóng VRAM từ Phase 1 (LaBSE, BERTAlign, SimAlign) TRƯỚC khi nạp Qwen 7B
         print("[VRAM] Releasing Phase 1 scorer models from GPU before loading Qwen...")
         aligner.free_gpu_memory()
 
         from nlp.qwen_verifier import QwenVerifier
         verifier = QwenVerifier(qwen_conf)
-        raw_aligned = verifier.verify(raw_aligned, cache_path=phase2_cache)
-        
-        # Split rejected pairs (verified == False) into unaligned sentences to avoid false matches
-        filtered_aligned = []
-        for item in raw_aligned:
-            if not item.get("verified", True):
-                print(f"[Qwen] Splitting incorrect match (score={item.get('qwen_score')}):")
-                print(f"  Han:  {item['han_sentence']}")
-                print(f"  Viet: {item['viet_sentence']}")
-                if item["han_sentence"]:
-                    filtered_aligned.append({
-                        "han_sentence": item["han_sentence"],
-                        "viet_sentence": "",
-                        "similarity_score": 0.0,
-                        "han_indices": item.get("han_indices", []),
-                        "viet_indices": [],
-                        "confidence": 0.0,
-                        "status": "unmatched",
-                    })
-                if item["viet_sentence"]:
-                    filtered_aligned.append({
-                        "han_sentence": "",
-                        "viet_sentence": item["viet_sentence"],
-                        "similarity_score": 0.0,
-                        "han_indices": [],
-                        "viet_indices": item.get("viet_indices", []),
-                        "confidence": 0.0,
-                        "status": "unmatched",
-                    })
-            else:
-                filtered_aligned.append(item)
-        raw_aligned = filtered_aligned
+        raw_aligned = verifier.verify(raw_aligned, cache_path=phase2_checkpoint)
+        raw_aligned, phase2_rejected = split_non_exact_for_repair(
+            raw_aligned,
+            repair_round=0,
+            han_source_units=all_sino_sentences,
+            viet_source_units=viet_sentences,
+        )
+        rejected_candidates.extend(phase2_rejected)
         validate_alignment_records(raw_aligned, len(all_sino_sentences), len(viet_sentences))
         
         # Save Phase 2 cache
         with open(phase2_cache, "w", encoding="utf-8") as f:
             json.dump(raw_aligned, f, ensure_ascii=False, indent=2)
+        with open(phase2_rejection_cache, "w", encoding="utf-8") as f:
+            json.dump(rejected_candidates, f, ensure_ascii=False, indent=2)
         print(f"[Cache] Saved Phase 2 alignment cache to: {phase2_cache}")
-        
-        # Giải phóng VRAM của Qwen sau khi hoàn tất Phase 2 để quyển sau chạy tiếp Phase 1 không bị OOM
-        print("[VRAM] Releasing Qwen verifier from GPU VRAM after Phase 2 completion...")
-        verifier.free_gpu_memory()
 
-    # 3.7 Phase 3: Qwen Local Re-Alignment of unresolved NaN clusters
+    # 3.7 Phase 3: iteratively redraw bad boundaries and verify the proposals.
+    # Exact beads are immutable anchors; non-exact proposals are split again.
     if realign_enabled and run_phase3 and isinstance(aligner, EnsembleSentenceAligner):
         from nlp.qwen_realigner import QwenRealigner
-        # Reuse model and tokenizer if already loaded in Phase 2
-        qwen_model = verifier._model if 'verifier' in locals() else None
-        qwen_tokenizer = verifier._tokenizer if 'verifier' in locals() else None
-        
-        realigner = QwenRealigner(
-            config=ENSEMBLE_CONFIG.get("qwen_verifier", {}),
-            model=qwen_model,
-            tokenizer=qwen_tokenizer
-        )
-        raw_aligned = realigner.realign(raw_aligned, cache_path=phase3_cache)
+        from nlp.qwen_verifier import QwenVerifier
+
+        if verifier is None:
+            verifier = QwenVerifier(qwen_conf)
+
+        for repair_round in range(1, max(0, repair_rounds) + 1):
+            exact_before = quality_counts(raw_aligned).get("exact", 0)
+            proposal_cache = os.path.join(
+                cache_dir,
+                f"{group_key}_{fingerprint}_phase3_{exact_suffix}_r{repair_round}_proposal.json",
+            )
+            verify_checkpoint = os.path.join(
+                cache_dir,
+                f"{group_key}_{fingerprint}_phase3_{exact_suffix}_r{repair_round}_verify.json",
+            )
+
+            realigner_config = dict(qwen_conf)
+            gemini_key = realigner_config.get("api_key") or os.environ.get(
+                "GEMINI_API_KEY", ""
+            )
+            if not gemini_key:
+                # The pipeline remains runnable without an API key. Reusing the
+                # verifier model avoids loading a second 7B model into VRAM.
+                realigner_config["realigner_model_name"] = verifier.model_name
+                print(
+                    "[ExactRepair] GEMINI_API_KEY not found; using the local "
+                    "Qwen verifier model for boundary repair."
+                )
+            realigner = QwenRealigner(
+                config=realigner_config,
+                model=verifier._model,
+                tokenizer=verifier._tokenizer,
+            )
+            proposed = realigner.realign(raw_aligned, cache_path=proposal_cache)
+            if verifier._model is None and realigner._model is not None:
+                verifier._model = realigner._model
+                verifier._tokenizer = realigner._tokenizer
+            proposed = verifier.verify(proposed, cache_path=verify_checkpoint)
+            raw_aligned, round_rejected = split_non_exact_for_repair(
+                proposed,
+                repair_round=repair_round,
+                han_source_units=all_sino_sentences,
+                viet_source_units=viet_sentences,
+            )
+            rejected_candidates.extend(round_rejected)
+            validate_alignment_records(
+                raw_aligned, len(all_sino_sentences), len(viet_sentences)
+            )
+
+            exact_after = quality_counts(raw_aligned).get("exact", 0)
+            print(
+                f"[ExactRepair] Round {repair_round}: exact {exact_before} -> "
+                f"{exact_after} (+{exact_after - exact_before})."
+            )
+            with open(phase3_rejection_cache, "w", encoding="utf-8") as f:
+                json.dump(rejected_candidates, f, ensure_ascii=False, indent=2)
+
+            if exact_after <= exact_before:
+                print("[ExactRepair] No exact gain; stopping instead of repeating guesses.")
+                break
+
+        with open(phase3_cache, "w", encoding="utf-8") as f:
+            json.dump(raw_aligned, f, ensure_ascii=False, indent=2)
+        print(f"[Cache] Saved final exact-repair cache to: {phase3_cache}")
+
+    if verifier is not None:
+        print("[VRAM] Releasing completeness verifier after all repair rounds...")
+        verifier.free_gpu_memory()
 
     validate_alignment_records(raw_aligned, len(all_sino_sentences), len(viet_sentences))
 
     # 4. Map pairs back to verified volume boundaries using source indices.
     volume_aligned_data = {} # vol_code -> list of aligned dicts
+    volume_rejected_data = {} # rejected candidate beads, retained for diagnosis
 
     known_record_volumes = []
     for item in raw_aligned:
@@ -421,6 +488,28 @@ def process_alignment_group(
         ]
         enriched["volume"] = vol
         volume_aligned_data[vol].append(enriched)
+
+    for item in rejected_candidates:
+        h_idxs = item.get("han_indices", [])
+        if not h_idxs:
+            continue
+        item_volumes = {sino_source_map[index] for index in h_idxs}
+        if len(item_volumes) != 1:
+            raise ValueError(
+                f"rejected bead crosses verified volume boundary: {sorted(item_volumes)}"
+            )
+        vol = next(iter(item_volumes))
+        enriched = dict(item)
+        enriched["han_source_ids"] = [sino_source_ids[index] for index in h_idxs]
+        enriched["han_original_ids"] = [sino_original_ids[index] for index in h_idxs]
+        enriched["viet_source_ids"] = [
+            viet_source_ids[index] for index in item.get("viet_indices", [])
+        ]
+        enriched["viet_raw_sentences"] = [
+            viet_raw_sentences[index] for index in item.get("viet_indices", [])
+        ]
+        enriched["volume"] = vol
+        volume_rejected_data.setdefault(vol, []).append(enriched)
         
     # 5. Export each volume to its hierarchical directory
     for vol_code, aligned_list in volume_aligned_data.items():
@@ -432,13 +521,20 @@ def process_alignment_group(
                 "pair_id": f"{work_code}_{vol_code}_{idx+1:06d}",
             })
             formatted_aligned.append(formatted_item)
+
+        formatted_rejected = []
+        for idx, item in enumerate(volume_rejected_data.get(vol_code, [])):
+            formatted_item = dict(item)
+            formatted_item["pair_id"] = f"{work_code}_{vol_code}_REJECTED_{idx+1:06d}"
+            formatted_rejected.append(formatted_item)
             
         print(f"Exporting Volume {vol_code} with {len(formatted_aligned)} aligned pairs...")
         exporter.export_hierarchical(
             parent_dir=work_code,
             chapter_str=vol_code,
             aligned_data=formatted_aligned,
-            han_raw_text=vol_raw_text.get(vol_code)
+            han_raw_text=vol_raw_text.get(vol_code),
+            rejected_data=formatted_rejected,
         )
         
         # In báo cáo sơ bộ cho từng volume
@@ -466,6 +562,10 @@ def main():
     parser.add_argument("--aligner", type=str, default="ensemble", choices=["embedding", "ensemble"], help="Aligner implementation to use")
     parser.add_argument("--qwen", action="store_true", default=False, help="Run Qwen LLM verification filter (Phase 2)")
     parser.add_argument("--realign", action="store_true", default=False, help="Run Qwen Phase 3 local re-alignment of NaN clusters")
+    parser.add_argument(
+        "--repair-rounds", type=int, default=3,
+        help="Maximum exact-repair rounds after full completeness verification (default: 3)",
+    )
     
     args = parser.parse_args()
     
@@ -575,7 +675,8 @@ def main():
                         exporter=exporter,
                         work_code=args.work_code,
                         qwen_enabled=args.qwen,
-                        realign_enabled=args.realign
+                        realign_enabled=args.realign,
+                        repair_rounds=args.repair_rounds,
                     )
             else:
                 print(f"[Error] Merged sino file not found: {sino_path}")
@@ -588,7 +689,8 @@ def main():
                 exporter=exporter,
                 work_code=args.work_code,
                 qwen_enabled=args.qwen,
-                realign_enabled=args.realign
+                realign_enabled=args.realign,
+                repair_rounds=args.repair_rounds,
             )
 
     print("\nMapping phase completed successfully!")

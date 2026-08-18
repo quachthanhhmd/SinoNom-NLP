@@ -17,11 +17,11 @@ def main():
     all_pairs = []
     
     seen_pairs = set()
-    # Only the accepted partition is training-ready.  Reading every file named
+    # Only the completeness-verified exact partition is training-ready. Reading every file named
     # *_parallel.tsv could ingest both a merged artifact and per-volume copies.
     for root, dirs, files in os.walk(work_dir):
         for file in files:
-            if file.endswith("_accepted.tsv"):
+            if file.endswith("_exact_accepted.tsv"):
                 tsv_path = os.path.join(root, file)
                 print(f"  Reading: {tsv_path}")
                 try:

@@ -1,3 +1,8 @@
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 from scripts.check_gemini_api import interpret_response, mask_key
 
 
@@ -23,3 +28,20 @@ def test_gemini_auth_and_quota_failures_are_actionable():
     assert "API key" in message_403
     assert usable_429 is False
     assert "quota" in message_429
+
+
+def test_script_entrypoint_can_import_root_config():
+    repo_root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment.pop("GEMINI_API_KEY", None)
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "scripts" / "check_gemini_api.py")],
+        cwd=repo_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "GEMINI_API_KEY" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr

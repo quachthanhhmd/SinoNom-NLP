@@ -6,7 +6,16 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Dict, List, Tuple
+
+
+# When invoked as ``python scripts/check_gemini_api.py``, Python puts only the
+# scripts directory on sys.path. Add the repository root so ``config.py`` is
+# importable exactly as it is from run_mapping.py and the Kaggle notebook.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 def mask_key(key: str) -> str:

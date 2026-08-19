@@ -196,13 +196,10 @@ class PaddleOCRProvider(OCRProvider):
             version = getattr(paddleocr, '__version__', '2.8.1')
             
             if version.startswith('3'):
-                self.ocr = PaddleOCR(
-                    use_textline_orientation=True, 
-                    lang='chinese_cht',
-                    text_det_unclip_ratio=1.8,
-                    text_det_box_thresh=0.4
-                    # drop_score is not supported in 3.x
-                )
+                # build_ocr_engine tắt tường minh doc_orientation_classify và
+                # doc_unwarping — hai thứ này mặc định BẬT ở 3.x và làm hỏng ảnh cột.
+                from ocr.ocr_pipeline import build_ocr_engine
+                self.ocr = build_ocr_engine()
             else:
                 self.ocr = PaddleOCR(
                     use_angle_cls=True, 

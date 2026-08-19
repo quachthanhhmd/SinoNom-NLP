@@ -11,3 +11,5 @@ Pillow
 numpy
 opencv-python
 pymupdf
+scipy
+opencc-python-reimplemented

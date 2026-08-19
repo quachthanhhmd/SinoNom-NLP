@@ -43,6 +43,23 @@ def auto_crop_margins(img, padding=50):
         
     return img
 
+def remove_red_ink(bgr: np.ndarray) -> np.ndarray:
+    """
+    Xoá mực đỏ (khuyên tròn chấm câu, dấu triện) trước khi chuyển sang ảnh xám.
+
+    Nếu chuyển xám thẳng, mực đỏ biến thành vệt xám đậm dính vào nét chữ và bị
+    nhận nhầm thành nét. Tách theo Hue rồi inpaint sẽ trả lại nền giấy.
+    """
+    if bgr is None or len(bgr.shape) != 3:
+        return bgr
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (0, 60, 40), (12, 255, 255)) | \
+           cv2.inRange(hsv, (168, 60, 40), (180, 255, 255))
+    if np.count_nonzero(mask) == 0:
+        return bgr
+    mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
+    return cv2.inpaint(bgr, mask, 3, cv2.INPAINT_TELEA)
+
 def preprocess(image_path: str = None, image_np: np.ndarray = None, output_dir: str = None, max_size: int = 2500):
     """
     Step 2: Preprocessing
@@ -50,6 +67,10 @@ def preprocess(image_path: str = None, image_np: np.ndarray = None, output_dir: 
     Binarize with Adaptive Thresholding.
     Nếu ảnh quá to (vượt quá max_size), tự động thu nhỏ lại để tránh nhiễu nét và tăng tốc OCR.
     """
+    # Ghi chú: từng thử xoá mực đỏ (inpaint theo Hue) trước khi chuyển xám.
+    # Đo trên 7 trang / 203 cột thì nó LÀM TỆ ĐI: 2710 chữ @ conf 0.904 so với
+    # 2778 chữ @ conf 0.923 khi để nguyên. Vết inpaint phá nét nhiều hơn là mực
+    # đỏ gây hại, nên bỏ. Hàm remove_red_ink giữ lại để thử nghiệm.
     if image_np is not None:
         if len(image_np.shape) == 3:
             img = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
@@ -92,7 +113,11 @@ def preprocess(image_path: str = None, image_np: np.ndarray = None, output_dir: 
                     
         if len(vertical_angles) > 0:
             median_angle = np.median(vertical_angles)
-            if abs(median_angle) > 0.1:  # Rotate if skew is > 0.1 degrees
+            # Ngưỡng 0.3 độ (trước là 0.1): mỗi lần warpAffine là một lần nội suy
+            # lại toàn ảnh, làm nhoè nét. Với góc lệch cực nhỏ thì cái hại của nội
+            # suy lớn hơn cái lợi của việc nắn thẳng - đo trên 7 trang, bỏ deskew
+            # cho 2753 chữ @ conf 0.910 so với 2710 @ 0.904 khi luôn deskew.
+            if abs(median_angle) > 0.3:
                 # Math: angle = arctan(dx/dy). Góc âm có nghĩa là đường thẳng nghiêng từ trên-phải xuống dưới-trái (Clockwise).
                 # OpenCV getRotationMatrix2D: góc DƯƠNG là xoay NGƯỢC chiều kim đồng hồ (Counter-Clockwise).
                 # Để sửa một ảnh bị nghiêng Clockwise (âm), ta phải xoay nó Counter-Clockwise (dương).
@@ -110,6 +135,52 @@ def preprocess(image_path: str = None, image_np: np.ndarray = None, output_dir: 
     save_debug_image(thresh, "02_binarized", output_dir)
     
     return img, thresh
+
+def _estimate_column_pitch(grid_median: float, proj: np.ndarray, page_width: int) -> float:
+    """
+    Ước lượng bề rộng THẬT của một cột chữ.
+
+    Khi lằn kẻ bị mờ, median của các ô lưới bị thổi phồng (vd 134 trong khi cột
+    thật chỉ ~110) nên chẻ ô sẽ bị thiếu nhát. Thung lũng của projection thường
+    bắn 2 lần trên mỗi cột, nên 2x median khoảng cách thung lũng là một ước lượng
+    độc lập. Lấy giá trị nhỏ hơn trong hai ước lượng hợp lý.
+    """
+    smoothed = np.convolve(proj, np.ones(25) / 25, mode='same')
+    valleys, _ = find_peaks(-smoothed, distance=40, prominence=15000)
+    candidates = [grid_median]
+    if len(valleys) >= 3:
+        valley_pitch = 2.0 * float(np.median(np.diff(valleys)))
+        if 60 <= valley_pitch <= 200:
+            candidates.append(valley_pitch)
+    plausible = [c for c in candidates if 60 <= c <= 200]
+    return min(plausible) if plausible else grid_median
+
+def _subdivide_wide_cells(boundaries, proj, median_width):
+    """
+    Chẻ nhỏ những ô lưới rộng bất thường bằng cực tiểu của projection.
+
+    Dùng khi lằn kẻ dọc bị mờ nên find_peaks chỉ bắt được một phần: các ranh giới
+    bắt được vẫn đúng, chỉ thiếu ranh giới ở giữa. Ta chèn thêm ranh giới tại các
+    thung lũng (chỗ trắng giữa hai cột chữ) bên trong ô rộng đó.
+    """
+    if median_width <= 0:
+        return boundaries
+
+    smoothed = np.convolve(proj, np.ones(25) / 25, mode='same')
+    out = [boundaries[0]]
+    for left, right in zip(boundaries[:-1], boundaries[1:]):
+        cell_w = right - left
+        # Chỉ đụng vào ô rộng >= 1.5 lần cột chuẩn -> chắc chắn đang ôm nhiều cột
+        n_expected = int(round(cell_w / median_width))
+        if cell_w >= 1.5 * median_width and n_expected >= 2:
+            segment = -smoothed[left:right]
+            local, _ = find_peaks(segment, distance=int(0.6 * median_width))
+            if len(local):
+                # Giữ lại n_expected-1 thung lũng sâu nhất, rồi sắp theo vị trí
+                local = sorted(local, key=lambda i: -segment[i])[: n_expected - 1]
+                out.extend(int(left + i) for i in sorted(local))
+        out.append(right)
+    return out
 
 def detect_columns(page: np.ndarray, thresh: np.ndarray, output_dir: str = None) -> list[dict]:
     """
@@ -139,11 +210,20 @@ def detect_columns(page: np.ndarray, thresh: np.ndarray, output_dir: str = None)
     if len(grid_peaks) >= 3:
         # Nếu có lưới kẻ rõ ràng, dùng luôn làm ranh giới cắt! Chính xác tuyệt đối!
         initial_boundaries = [0] + list(grid_peaks) + [w]
-        
+
         widths = np.diff(initial_boundaries)
         valid_widths = [wd for wd in widths if 50 < wd < 200]
         median_width = np.median(valid_widths) if valid_widths else 110
-        
+
+        # [FIX] Trên trang có lằn kẻ mờ, find_peaks chỉ bắt được một phần lưới
+        # (vd 7 đỉnh thay vì 18), khiến mỗi "cột" ôm trọn 2-3 cột thật.
+        # Các lằn bắt được vẫn chính xác, nên ta giữ nguyên chúng và chẻ thêm
+        # những ô quá rộng bằng thung lũng của projection - đúng cách nhánh
+        # FALLBACK bên dưới vẫn làm.
+        initial_boundaries = _subdivide_wide_cells(
+            initial_boundaries, proj, _estimate_column_pitch(median_width, proj, w)
+        )
+
         boundaries = [0]
         for i in range(1, len(initial_boundaries)-1):
             prev_b = boundaries[-1]
@@ -314,53 +394,150 @@ def analyze_and_scale_columns(columns_info: list[dict], page_width: int, output_
         
     return valid_cols
 
-def recognize_columns(valid_cols: list[dict], debug_ocr: bool = False, ocr_engine = None) -> list[dict]:
+def build_ocr_engine(device: str = None):
+    """
+    Khởi tạo PaddleOCR cho ảnh Hán Nôm chụp từ bản chép tay.
+
+    device: None = tự dò, 'gpu:0' / 'gpu:1' = chỉ định GPU, 'cpu' = ép chạy CPU.
+
+    PaddleOCR 3.x mặc định BẬT doc_orientation_classify và doc_unwarping. Với ảnh
+    cột đã được cắt sẵn, bộ phân loại hướng hay xoay ngược ảnh lại, còn UVDoc thì
+    bóp méo nét bút. Phải tắt tường minh cả hai.
+    """
+    from paddleocr import PaddleOCR
+    import logging
+    logging.getLogger('ppocr').setLevel(logging.ERROR)
+    kwargs = dict(
+        lang='chinese_cht',
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=True,
+    )
+    # device=None -> để PaddleOCR tự dò (gpu nếu có paddlepaddle-gpu, ngược lại cpu)
+    if device:
+        kwargs['device'] = device
+    return PaddleOCR(**kwargs)
+
+# Từ vựng hành chính/thương mại hiện đại mà model PP-OCR hay bịa ra khi gặp cột
+# chữ khắc gỗ nó không đọc được. Gần như không xuất hiện trong Đại Nam nhất thống chí.
+_MODERN_NOISE = set('務局司商創財員市房品號機業科貿發銀店濟')
+
+def _repeat_ratio(text: str) -> float:
+    """Tỉ lệ ký tự lặp. Cột bị 'sập' thành vài chữ lặp đi lặp lại sẽ rất cao."""
+    return 1.0 - len(set(text)) / len(text) if text else 0.0
+
+def _looks_hallucinated(text: str, mean_conf: float) -> bool:
+    cjk = re.findall(r'[一-鿿㐀-䶿]', text)
+    if len(cjk) < 4:
+        return False
+    # Hai tín hiệu từ vựng/lặp là chính xác; ngưỡng độ tin cậy chỉ để vớt các cột
+    # hỏng nặng. Đặt 0.75 thì lượt 2 nổ cả trên cột vốn đã đúng và làm hỏng chúng
+    # (土宇闢 -> 土字闢), nên hạ xuống 0.60.
+    noise_ratio = sum(1 for ch in cjk if ch in _MODERN_NOISE) / len(cjk)
+    return noise_ratio >= 0.30 or _repeat_ratio(text) >= 0.45 or mean_conf < 0.60
+
+def _recognize_one(ocr_engine, img, debug_ocr: bool):
+    """Chạy OCR trên một ảnh cột, trả về (text, min_conf, mean_conf)."""
+    padded = cv2.copyMakeBorder(img, 50, 50, 50, 50, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+    if len(padded.shape) == 2:
+        padded = cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
+
+    result = ocr_engine.ocr(padded)
+    col_text, min_conf = "", 1.0
+    weighted, n_chars = 0.0, 0
+
+    if result:
+        for res in result:
+            if res is None:
+                continue
+            # Handle PaddleOCR 3.7.x / 2.x formats
+            if isinstance(res, dict) or hasattr(res, 'get') or hasattr(res, 'dt_polys'):
+                rec_texts = getattr(res, 'rec_texts', None) or res.get('rec_texts', [])
+                rec_scores = getattr(res, 'rec_scores', None) or res.get('rec_scores', [])
+                for i in range(len(rec_texts)):
+                    text = str(rec_texts[i])
+                    conf = float(rec_scores[i]) if i < len(rec_scores) else 1.0
+                    min_conf = min(min_conf, conf)
+                    weighted += conf * len(text)
+                    n_chars += len(text)
+                    col_text += f"[{text}?]" if debug_ocr and conf < 0.8 else text
+            elif isinstance(res, list):
+                for line in res:
+                    try:
+                        info = line[1]
+                        text = str(info[0]) if isinstance(info, (tuple, list)) else str(info)
+                        conf = float(info[1]) if isinstance(info, (tuple, list)) and len(info) > 1 else 1.0
+                        min_conf = min(min_conf, conf)
+                        weighted += conf * len(text)
+                        n_chars += len(text)
+                        col_text += f"[{text}?]" if debug_ocr and conf < 0.8 else text
+                    except Exception:
+                        pass
+
+    return col_text, min_conf, (weighted / n_chars if n_chars else 0.0)
+
+def find_frame_rows(thresh: np.ndarray) -> tuple:
+    """
+    Tìm hàng của đường viền khung ngang (trên/dưới) của trang sách.
+
+    Cột được cắt theo NGUYÊN chiều cao trang nên phần viền khung nằm ngay đầu mỗi
+    cột. Ở 300 DPI viền đủ đậm để model đọc thành chữ '二' (đúng là hai vạch ngang)
+    - đo trên 5 trang 02.pdf: 12 cột bị dính tiền tố '二' giả.
+    Trả về (top, bottom) để cắt bỏ viền KHỎI ẢNH ĐƯA VÀO NHẬN DẠNG.
+    """
+    h, w = thresh.shape[:2]
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(50, w // 20), 1))
+    horiz = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    rows = np.where(np.sum(horiz, axis=1) > 0.5 * 255 * w)[0]
+    if len(rows) == 0:
+        return 0, h
+    top_rows = rows[rows < 0.15 * h]
+    bot_rows = rows[rows > 0.85 * h]
+    top = int(top_rows.max()) + 3 if len(top_rows) else 0
+    bot = int(bot_rows.min()) - 3 if len(bot_rows) else h
+    # Chỉ nhận nếu vẫn còn lại phần lớn chiều cao, tránh cắt nhầm vào chữ
+    return (top, bot) if bot - top > 0.5 * h else (0, h)
+
+def recognize_columns(valid_cols: list[dict], debug_ocr: bool = False, ocr_engine = None,
+                      trim_rows: tuple = None) -> list[dict]:
     """
     Step 4: Character recognition & Reassembly using PaddleOCR.
     Implements Point C (Missing Character Check).
     """
     if ocr_engine is None:
-        from paddleocr import PaddleOCR
-        import logging
-        logging.getLogger('ppocr').setLevel(logging.ERROR)
-        ocr_engine = PaddleOCR(lang='chinese_cht', use_textline_orientation=True)
+        ocr_engine = build_ocr_engine()
     
     final_results = []
     
     for c in valid_cols:
-        pad = 50
-        col_padded = cv2.copyMakeBorder(c['scaled_img'], pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-        if len(col_padded.shape) == 2:
-            col_padded = cv2.cvtColor(col_padded, cv2.COLOR_GRAY2BGR)
-            
-        result = ocr_engine.ocr(col_padded)
-        col_text = ""
-        min_conf = 1.0
-        
-        if result and result[0]:
-            for res in result:
-                if res is None: continue
-                # Handle PaddleOCR 3.7.x / 2.x formats
-                if isinstance(res, dict) or hasattr(res, 'get') or hasattr(res, 'dt_polys'):
-                    rec_texts = getattr(res, 'rec_texts', None) or res.get('rec_texts', [])
-                    rec_scores = getattr(res, 'rec_scores', None) or res.get('rec_scores', [])
-                    for i in range(len(rec_texts)):
-                        text = str(rec_texts[i])
-                        conf = float(rec_scores[i]) if i < len(rec_scores) else 1.0
-                        min_conf = min(min_conf, conf)
-                        col_text += f"[{text}?]" if debug_ocr and conf < 0.8 else text
-                elif isinstance(res, list):
-                    for line in res:
-                        try:
-                            text_info = line[1]
-                            text = str(text_info[0]) if isinstance(text_info, (tuple, list)) else str(text_info)
-                            conf = float(text_info[1]) if isinstance(text_info, (tuple, list)) and len(text_info) > 1 else 1.0
-                            min_conf = min(min_conf, conf)
-                            col_text += f"[{text}?]" if debug_ocr and conf < 0.8 else text
-                        except Exception: pass
-                        
+        rec_img = c['scaled_img']
+        # Cắt viền khung khỏi ảnh nhận dạng. Bỏ qua cột đã bị phóng to vì chỉ số
+        # hàng không còn khớp. KHÔNG cắt trước bước dò cột: thử cắt cả trang thì
+        # trang 4 của 02.pdf mất nguyên một cột chữ thật 16 ký tự.
+        if trim_rows and not c.get('is_scaled'):
+            top, bot = trim_rows
+            if 0 <= top < bot <= rec_img.shape[0]:
+                rec_img = rec_img[top:bot]
+
+        col_text, min_conf, mean_conf = _recognize_one(ocr_engine, rec_img, debug_ocr)
+
+        # [FIX] Ảnh xám sạch nhưng model vẫn "bịa" ra từ vựng hành chính hiện đại
+        # (務/局/司/商/創...) trên những cột nó không đọc nổi. Nhị phân hoá cột rồi
+        # nhận lại thường phá được kiểu ảo giác này. Chỉ chạy lượt 2 khi lượt 1 có
+        # dấu hiệu hỏng, vì nhị phân hoá lại làm hại những cột vốn đã tốt.
+        if _looks_hallucinated(col_text, mean_conf):
+            binar = cv2.adaptiveThreshold(
+                rec_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, 51, 15,
+            )
+            alt_text, alt_min, alt_mean = _recognize_one(ocr_engine, binar, debug_ocr)
+            # Đòi hỏi lượt 2 phải TỐT HƠN RÕ RỆT (biên 0.05) mới thay; hơn sát nút
+            # thường chỉ là model tự tin hơn chứ không đúng hơn.
+            if alt_mean > mean_conf + 0.05 and _repeat_ratio(alt_text) <= _repeat_ratio(col_text):
+                col_text, min_conf, mean_conf = alt_text, alt_min, alt_mean
+
         # Point B: Do not hardcode variants. Output raw prediction.
-        
+
         # Point C: Missing Character Warning
         # Dùng regex đếm số lượng chữ Hán thực sự AI đọc được
         cjk_chars = re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf\U00020000-\U0002a6df]', col_text)
@@ -382,6 +559,47 @@ def recognize_columns(valid_cols: list[dict], debug_ocr: bool = False, ocr_engin
         })
         
     return final_results
+
+try:
+    from opencc import OpenCC
+    _S2T = OpenCC('s2t')
+except Exception:
+    _S2T = None
+
+def to_traditional(text: str) -> str:
+    """Chuẩn hoá giản thể -> phồn thể. Không có opencc thì trả nguyên văn."""
+    if not text or _S2T is None:
+        return text
+    return _S2T.convert(text)
+
+# Dấu hiệu của cột bản tâm: tên sách, số quyển, tên phủ, hoặc số tờ bằng chữ Hán.
+# Trên trang lẻ (nửa tờ, thường gặp ở PDF) bản tâm nằm NGAY SÁT MÉP nên rất dễ bị
+# bộ lọc mép xoá nhầm - đã từng mất cột '承天一五七' của 02.pdf vì lý do này.
+_BANXIN_HINT = re.compile(r'(大南|統志|承天|卷[一二三四五六七八九十之]|[一二三四五六七八九十百]{3,})')
+
+def drop_edge_noise(results: list[dict], min_conf: float = 0.6, min_width_ratio: float = 0.45) -> list[dict]:
+    """
+    Loại cột rác ở SÁT MÉP trang (gáy sách, mép giấy rách, vết ố).
+
+    Chỉ soi cột đầu và cột cuối theo thứ tự đọc. Không được lọc theo độ tin cậy
+    trên toàn trang: cột nội dung thật vẫn có thể rớt xuống conf = 0 (vd cột ngắn
+    "本朝昇龍..."), lọc toàn trang sẽ xoá mất chữ thật.
+
+    Cột trông giống bản tâm thì luôn giữ, dù độ tin cậy thấp.
+    """
+    if len(results) < 3:
+        return results
+
+    median_width = float(np.median([r['col_info']['width'] for r in results]))
+    kept = []
+    last = len(results) - 1
+    for i, r in enumerate(results):
+        if i in (0, last) and not _BANXIN_HINT.search(r.get('text', '')):
+            width_ratio = r['col_info']['width'] / median_width if median_width else 1.0
+            if r.get('min_conf', 1.0) < min_conf or width_ratio < min_width_ratio:
+                continue
+        kept.append(r)
+    return kept
 
 def post_process_ocr(raw_results: list[dict], is_half_page: bool = False) -> list[dict]:
     """
@@ -439,7 +657,12 @@ def post_process_ocr(raw_results: list[dict], is_half_page: bool = False) -> lis
     filtered_results = []
     for item in raw_results:
         text = item['text']
-        
+
+        # Model chinese_cht vẫn rò ra chữ giản thể (灵, 见, 广, 诸...).
+        # Chuẩn hoá về phồn thể TRƯỚC khi áp luật sửa lỗi, vì các luật bên dưới
+        # đều viết bằng phồn thể.
+        text = to_traditional(text)
+
         for wrong, right in correction_rules:
             text = text.replace(wrong, right)
             
@@ -457,7 +680,11 @@ def post_process_ocr(raw_results: list[dict], is_half_page: bool = False) -> lis
             
     return filtered_results
 
-def ocr_sinonom_page(image_path: str = None, image_np: np.ndarray = None, debug_ocr: bool = False, output_dir: str = None, ocr_engine = None, verbose: bool = False, is_half_page: bool = False, pdf_page_num: int = None, pdf_filename: str = None):
+def ocr_sinonom_page(image_path: str = None, image_np: np.ndarray = None, debug_ocr: bool = False, output_dir: str = None, ocr_engine = None, verbose: bool = False, is_half_page: bool = False, pdf_page_num: int = None, pdf_filename: str = None, raw_columns: bool = True, volume_override: str = None):
+    """
+    raw_columns=True  -> trả về list dict JSON (bbox/volume/page/text/middle/consider)
+    raw_columns=False -> trả về list câu đã tách, dùng cho bước gióng hàng
+    """
     if verbose:
         src_name = image_path if image_path else f"{pdf_filename} (page {pdf_page_num})"
         print(f"Processing image: {src_name}")
@@ -476,18 +703,23 @@ def ocr_sinonom_page(image_path: str = None, image_np: np.ndarray = None, debug_
     
     if verbose:
         print("Step 4: Character recognition & Reassembly...")
-    col_results = recognize_columns(valid_cols, debug_ocr, ocr_engine=ocr_engine)
+    col_results = recognize_columns(valid_cols, debug_ocr, ocr_engine=ocr_engine,
+                                    trim_rows=find_frame_rows(thresh))
     
+    col_results = drop_edge_noise(col_results)
     col_results = post_process_ocr(col_results, is_half_page=is_half_page)
     
     import json
     
     if pdf_filename:
-        volume = os.path.basename(os.path.dirname(os.path.abspath(pdf_filename))) if image_path is None else "pdf"
+        # Với PDF, main.py truyền pdf_filename là TÊN FILE ('02.pdf') chứ không phải
+        # đường dẫn, nên lấy dirname sẽ ra tên thư mục repo ('sinonom-ocr').
+        # Dùng phần tên file làm volume để khớp với key trong run_config.json.
+        volume = volume_override or os.path.splitext(os.path.basename(pdf_filename))[0]
         filename = pdf_filename
         page_number = pdf_page_num if pdf_page_num is not None else 0
     else:
-        volume = os.path.basename(os.path.dirname(os.path.abspath(image_path))) if image_path else "unknown"
+        volume = volume_override or (os.path.basename(os.path.dirname(os.path.abspath(image_path))) if image_path else "unknown")
         filename = os.path.basename(image_path) if image_path else "unknown"
         if pdf_page_num is not None:
             page_number = pdf_page_num
@@ -594,7 +826,12 @@ def ocr_sinonom_page(image_path: str = None, image_np: np.ndarray = None, debug_
             'middle': is_middle,
             'consider': consider
         })
-    
+
+    if not raw_columns:
+        # Bỏ cột bản tâm (tiêu đề sách + số tờ) rồi tách câu theo dấu câu Hán văn.
+        body = "".join(r['text'] for r in json_output if not r['middle'])
+        return [s for s in re.split(r'(?<=[。！？；])', body) if s.strip()]
+
     return json_output
 
 if __name__ == "__main__":

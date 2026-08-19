@@ -46,13 +46,13 @@ def main():
             except Exception as e:
                 print(f"Failed to load {args.run_config}: {e}")
 
-        from ocr.ocr_pipeline import ocr_sinonom_page
-        from paddleocr import PaddleOCR
-        import logging
-        logging.getLogger('ppocr').setLevel(logging.ERROR)
-        
-        print("Initializing global PaddleOCR engine for batch processing (CPU mode)...")
-        ocr_engine = PaddleOCR(lang='chinese_cht', use_textline_orientation=True)
+        from ocr.ocr_pipeline import ocr_sinonom_page, build_ocr_engine
+
+        # Dùng build_ocr_engine thay vì tự gọi PaddleOCR: nó tắt tường minh
+        # doc_orientation_classify và doc_unwarping (PaddleOCR 3.x mặc định BẬT
+        # cả hai, UVDoc bóp méo nét bút còn bộ phân loại hướng xoay ngược ảnh cột).
+        print("Initializing global PaddleOCR engine for batch processing...")
+        ocr_engine = build_ocr_engine()
 
         # ---------------------------------------------------------
         # 1. XỬ LÝ ẢNH TRONG CÁC THƯ MỤC (IMAGE FOLDERS)
@@ -168,8 +168,12 @@ def main():
                         
                         try:
                             page = doc[page_index]
-                            # Render to high-res image (300 DPI equivalent)
-                            pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
+                            # 300 DPI thật (Matrix(3,3) chỉ là 216 DPI dù comment cũ ghi 300).
+                            # Đo trên 02.pdf trang 6: 216dpi -> cột rộng 64px, 13 cột, 4 cột rác,
+                            # không thấy bản tâm. 300dpi -> 91px, 15 cột, 2 cột rác, thấy bản tâm.
+                            # 91px khớp với ảnh q1 (~94px) vốn cho kết quả tốt. Sau auto_crop vẫn
+                            # dưới max_size=2500 nên không bị thu nhỏ lại.
+                            pix = page.get_pixmap(dpi=300)
                             img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
                             
                             # Xử lý RGB to BGR nếu cần (OpenCV dùng BGR)
@@ -190,7 +194,8 @@ def main():
                                 ocr_engine=ocr_engine,
                                 is_half_page=is_half_page,
                                 pdf_page_num=page_num_1_indexed,
-                                pdf_filename=pdf_name
+                                pdf_filename=pdf_name,
+                                volume_override=work_id
                             )
                             if isinstance(page_results, list):
                                 work_results.extend(page_results)

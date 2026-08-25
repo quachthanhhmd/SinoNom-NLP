@@ -23,7 +23,7 @@ test/sv_1271_crop_20.jpg	nổi binh.
 test/sv_1379_crop_19.jpg	Tu, Khâm sai cai cơ là Đoàn Văn Sở, Nguyễn Văn Vạn, Trần Văn Loan,
 test/sv_558_crop_13.jpg	ở phân tán, chim muông lông thưa thớt và thay đổi.
 test/sv_237_crop_5.png	lập được triều đình, lại xét rõ rằng bọn thần là người mộc mạc
-test/MinhMenhchinhyeutap6ocr__page_380_crop_21.jpg	1971. 2 + XXVIII trang. Giá : 16000.
+test/MinhMenhchinhyeutap6ocr__page_380_crop_21.jpg	1971. 22 + XXVIII trang. Giá : 16000.
 test/sv_9319_crop_22.jpg	xiêu dạt nhiều không kể xiết.
 test/binhthuyeuluoctranquoctuan_page_002_crop_5.jpg	Nhưng các binh thư lại có rất nhiều thứ. Phần Nghệ-Văn-
 test/sv_9411_crop_17.jpg	Năm Quang Thiệu thứ 2 (1517) vua được truy tôn là Tương Dực Đế.

@@ -23,13 +23,13 @@ test/sv_1271_crop_20.jpg	nổi binh.
 test/sv_1379_crop_19.jpg	Tu, Khâm sai cai cơ là Đoàn Văn Sở, Nguyễn Văn Vạn, Trần Văn Loan,
 test/sv_558_crop_13.jpg	ở phân tán, chim muông lông thưa thớt và thay đổi.
 test/sv_237_crop_5.png	lập được triều đình, lại xét rõ rằng bọn thần là người mộc mạc
-test/MinhMenhchinhyeutap6ocr__page_380_crop_21.jpg	1971. 22 + XXVIII trang. Giá : 16000.
+test/MinhMenhchinhyeutap6ocr__page_380_crop_21.jpg	1971. 2 + XXVIII trang. Giá : 16000.
 test/sv_9319_crop_22.jpg	xiêu dạt nhiều không kể xiết.
 test/binhthuyeuluoctranquoctuan_page_002_crop_5.jpg	Nhưng các binh thư lại có rất nhiều thứ. Phần Nghệ-Văn-
 test/sv_9411_crop_17.jpg	Năm Quang Thiệu thứ 2 (1517) vua được truy tôn là Tương Dực Đế.
 test/khamdinhdainamhoidiensuletap8__page_187_crop_21.jpg	cho phụng thờ, sau đây nếu có xã dân nào lại đem việc ấy ra đi
 test/tutrithonggiam4__page_388_crop_27.jpg	với Đế là hành vi của Quách Dĩ không có khuôn phép, Đế cũng
-test/datviettroinam_page_514_crop_13.jpg	nằm trong lưu-vực thượng lưu Hồng-Hà, giữa hai tinh Yên-Bảy và
+test/datviettroinam_page_514_crop_13.jpg	nằm trong lưu-vực thượng lưu Hồng-Hà, giữa hai tỉnh Yên-Báy và
 test/khamdinhdainamhoidiensuletap15__page_340_crop_26.jpg	Lại chuẩn y lời nghị : Những quan binh đi ngồi thuyền vận
 test/sv_6448_crop_14.jpg	Rừng vàng, biển bạc, đất phì nhiêu"
 test/sv_9918_crop_0.jpg	LỊCH SỬ VIỆT NAM - TẬP 14
@@ -1323,7 +1323,25 @@ test/sv_8311_crop_30.jpg	19 trọng trong việc ốn định thị trường, c
 test/VNSuluocTranTrongKimv1_page_159_crop_15.jpg	Đường cũng đều thế cả (mẹ của Huyền là người họ Mã, thấy nuốt sao sa vào mồm,
 test/khamdinhdainamhoidiensuletap5__page_366_crop_6.jpg	phải thu năm nay là bao nhiêu, cho chiếu theo giá chợ, mỗi phương
 test/sv_1198_crop_0.jpg	100
-test/VNSuluocTranTrongKimv1_page_062_crop_2.jpg	Khôi Dư Chương Hàn An Quốc <12a>]stest/datviettroinam_page_290_crop_30.jpg	« Trong vùng Chapa, sâm này được thâu hoạch rất nhiều suốt cả
+test/VNSuluocTranTrongKimv1_page_062_crop_2.jpg	Khôi Dư Chương Hàn An Quốc <12a2 đem quân ra Cối Kê đánh Mân Việt. Hoài Nam
+test/sv_3186_crop_0.jpg	LỊCH SỬ VIỆT NAM - TẬP 15
+test/giadaotruyenthongbao_page_016_crop_33.jpg	Thuyền thuế: 5 » (bỏ chân, cứu
+test/khamdinhdainamhoidiensuletap15__page_219_crop_28.jpg	lĩnh. Từ trạm ấy trở vào nam, cứ thứ tự do ngựa phi dựa. Như ở
+test/datviettroinam_page_290_crop_45.jpg	chuyên chở thẳng sang Trung-Hoa, Sau khi biên-giới đóng lại, nó được
+test/quantrungtumenhtap__page_099_crop_6.jpg	đều phải hết chức vụ, tiến cử hiền tài. Còn như những
+test/minhmenhchinhyeutap2__page_102_crop_30.jpg	tới ». Liền lập tức ra lệnh phát kho ra hơn 1 ngàn 800 hộc
+test/sv_505_crop_31.jpg	Truy lập bia tiến sĩ.
+test/annamchinguyen__page_238_crop_4.jpg	phía nam Tượng Châu, chỗ phân chia bờ cõi giữa nước Tây Đồ
+test/sv_2724_crop_22.jpg	Sự lãnh đạo của Đảng Cộng sản Việt Nam, kỷ yếu Hội thảo,
+test/khamdinhdainamhoidiensuletap15__page_479_crop_12.jpg	văn hạch do bộ Lễ xét tâu, vẫn chiếu theo hạng mà cấp tiền gạo và
+test/uctraitap__page_070_crop_15.jpg	Thần Châu từ lúc dãy can qua.
+test/binhthuyeuluoctranquoctuan_page_023_crop_22.jpg	cháu. Ý ngươi thế nào? Hưng-Võ Vương đáp rằng: Ví dầu khác
+test/sv_288_crop_32.jpg	Có thuỷ tai lớn.
+test/letrieulichkhoatiensitap1__page_208_crop_16.jpg	Khê-hầu Mạc-Ninh-Chỉ tây âu cùng hàng trăm quan hữu tư, người
+test/letrieulichkhoatiensitap3__page_031_crop_10.jpg	điền hậu, nhiệm dụng chi dạo chu, cố kỳ đắc nhân chi hiệu chấn cổ
+test/sv_6838_crop_7.jpg	nước quân chủ hùng mạnh ở Đông Nam Á, đã phải rút lui khỏi vũ
+test/daivietsukytucbien_page_097_crop_22.jpg	giảm không nhất định nhưng dân đương thời cũng cho là vừa phải. Đến
+test/datviettroinam_page_290_crop_30.jpg	« Trong vùng Chapa, sâm này được thâu hoạch rất nhiều suốt cả
 test/khamdinhdainamhoidiensuletap9__page_142_crop_19.jpg	Minh Mạng năm thứ 15 (1834), trích lấy đội 3 Dực tín dồn
 test/sv_3065_crop_17.jpg	trong thời gian qua đã làm phong phú thêm diện mạo nền sử học
 test/khamdinhdainamhoidiensuletap15__page_048_crop_0.jpg	KHÂM ĐỊNH ĐẠI NAM

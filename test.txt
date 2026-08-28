@@ -8,7 +8,7 @@ test/dinhtienhoang_page_012_crop_24.jpg	Cầm đường ngày tháng thảnh th�
 test/daivietsukytucbien_page_317_crop_1.jpg	VIỆN NGHIÊN CỨU HÁN NÔM
 test/sv_2928_crop_22.jpg	người tôn thất được vua Trần Anh Tông rất yêu quý, nhưng không
 test/tutrithonggiam7__page_366_crop_16.jpg	Tần. Khuê giận, diệt hết người nhà của Bạt. Em họ của Trung
-test/phatgiaotriethoc_page_068_crop_10.jpg	nguyên-nhân của hiện tượng. Tri-giác được
+test/phatgiaotriethoc_page_068_crop_10.jpg	nguyên-nhân của hiện-tượng. Tri-giác được
 test/khamdinhdainamhoidiensuletap8__page_202_crop_28.jpg	phúc và tỏ ý tốt của ta nghĩ đến nơi chiến trận mà động lòng
 test/tangthuongngauluc__page_037_crop_22.jpg	phục thì nón chóp kiều thầy chùa, áo chẽn tay. Những
 test/annamchiluoc__page_105_crop_10.jpg	những quân còn sót lại ở các cánh, chỉ có 5.000 người, cùng Lê Tắc từ
@@ -17,13 +17,13 @@ test/khamdinhdainamhoidiensuletap15__page_069_crop_9.jpg	các đồ vật, pháo
 test/tutrithonggiam7__page_200_crop_7.jpg	cùng bọn Trấn giáp kích, đại phá Chiêu. Chiêu chạy về Hoạt
 test/tutrithonggiam7__page_171_crop_13.jpg	tay hướng về phía thành trì mà tạ tội:
 test/khamdinhdainamhoidiensuletap6__page_389_crop_20.jpg	lên, miễn cho không phải bồi tự, chuẩn làm thành lệnh.
-test/sv_5672_crop_1.jpg	phân khu trung tâm, uy hiếp vùng trời còn lại của chúng, ta điều
-test/minhmenhchinhyeutap2__page_072_crop_13.jpg	Thành thần Giu-định đem việc ấy tàu lên.
+test/sv_5672_crop_1.jpg	phân khu trung tâm, uy hiếp vùng trời còn lại của chúng, tạo điều
+test/minhmenhchinhyeutap2__page_072_crop_13.jpg	Thành thần Gia-định đem việc ấy tâu lên.
 test/sv_1271_crop_20.jpg	nổi binh.
 test/sv_1379_crop_19.jpg	Tu, Khâm sai cai cơ là Đoàn Văn Sở, Nguyễn Văn Vạn, Trần Văn Loan,
 test/sv_558_crop_13.jpg	ở phân tán, chim muông lông thưa thớt và thay đổi.
 test/sv_237_crop_5.png	lập được triều đình, lại xét rõ rằng bọn thần là người mộc mạc
-test/MinhMenhchinhyeutap6ocr__page_380_crop_21.jpg	1971. 2 + XXVIII trang. Giá : 16000.
+test/MinhMenhchinhyeutap6ocr__page_380_crop_21.jpg	1971. 22 + XXVIII trang. Giá : 16000.
 test/sv_9319_crop_22.jpg	xiêu dạt nhiều không kể xiết.
 test/binhthuyeuluoctranquoctuan_page_002_crop_5.jpg	Nhưng các binh thư lại có rất nhiều thứ. Phần Nghệ-Văn-
 test/sv_9411_crop_17.jpg	Năm Quang Thiệu thứ 2 (1517) vua được truy tôn là Tương Dực Đế.
@@ -31,13 +31,13 @@ test/khamdinhdainamhoidiensuletap8__page_187_crop_21.jpg	cho phụng thờ, sau 
 test/tutrithonggiam4__page_388_crop_27.jpg	với Đế là hành vi của Quách Dĩ không có khuôn phép, Đế cũng
 test/datviettroinam_page_514_crop_13.jpg	nằm trong lưu-vực thượng lưu Hồng-Hà, giữa hai tỉnh Yên-Báy và
 test/khamdinhdainamhoidiensuletap15__page_340_crop_26.jpg	Lại chuẩn y lời nghị : Những quan binh đi ngồi thuyền vận
-test/sv_6448_crop_14.jpg	Rừng vàng, biển bạc, đất phì nhiêu"
+test/sv_6448_crop_14.jpg	Rừng vàng, biển bạc, đất phì nhiêu"1
 test/sv_9918_crop_0.jpg	LỊCH SỬ VIỆT NAM - TẬP 14
 test/khamdinhdainamhoidiensuletap10__page_062_crop_10.jpg	quán ở ngạch số hạt nào, tra xét theo từng khoản một, cốt cho được
 test/tutrithonggiam4__page_025_crop_17.jpg	trói người vô tội, khiến quan dân lo sợ." Hủ dâng thư tự kêu
 test/VNSuluocTranTrongKimv1_page_540_crop_28.jpg	Sử thần Ngô Thì Sĩ bàn: Chính khi ở trong trời đất không phân biệt xưa
 test/sv_1622_crop_2.jpg	Cuộc khai thác thuộc địa với sự chuyển biến của các ngành
-test/tutrithonggiam4__page_388_crop_28.jpg	tùy theo ý Thôi mà ứng đáp hắn. Thôi mừng tự cho là mình tốt
+test/tutrithonggiam4__page_388_crop_28.jpg	tùy theo ý Thôi mà ứng đáp hắn. Thôi mừng, tự cho là mình tốt
 test/sv_7665_crop_0.jpg	64
 test/phathoctongyeu_page_068_crop_33.jpg	hoặc vào núi, đoạn tuyệt duyên đời, tu các
 test/sv_501_crop_22.jpg	Tháng 5. Lập đồn điền.
@@ -46,7 +46,7 @@ test/minhmenhchinhyeutap1__page_143_crop_26.jpg	Nguyễn-văn-Hiếu ít xả l�
 test/khamdinhdainamhoidiensuletap12__page_342_crop_2.jpg	thích bọn chúng dễ sai khiến, nên tin dùng cho lên chức cao quá,
 test/khamdinhdainamhoidiensuletap7__page_208_crop_7.jpg	mật sát, thì Thanh Hóa, Bình Định mỗi trường đều 4 viên ; trường
 test/vanphamvietnamtrantrongkim_page_114_crop_1.jpg	103
-test/dinhtienhoang_page_012_crop_7.jpg	ở trong triều. Năm đó, Chi Thành đã ngoài 20 tuổi. Dâng sở
+test/dinhtienhoang_page_012_crop_7.jpg	ở trong triều. Năm đó, Chi Thành đã ngoài 20 tuổi. Dâng sớ
 test/khamdinhdainamhoidiensuletap4__page_116_crop_10.jpg	huyện tổng xã trong hạt, chiều theo ruộng chiêm, ruộng mùa, và
 test/tangthuongngauluc__page_044_crop_14.jpg	Ông bắt trói, bắt phải bồi hoàn, nếu không sẽ đánh
 test/phathoctongyeu_page_086_crop_24.jpg	sáu trần, nên gọi là « xúc » ; từ 4, 5 tuổi cho
@@ -70,7 +70,7 @@ test/khamdinhdainamhoidiensuletap10__page_554_crop_23.jpg	tháng, cứ 20 tên l
 test/tangthuongngauluc__page_028_crop_7.jpg	“ Thế thì sáng mai, bà sửa xôi nếp cái, lợn nhỏ luộc
 test/daivietsukytienbienngothisi_page_374_crop_4.jpg	mùa thu đã về", cụp đuôi mà chạy ra khỏi Nam Quan không dám ngoảnh lại hay
 test/kienvanluc__page_108_crop_13.jpg	được mươi lăm bước, thấy sáng dần. Rồi thấy một cái cửa
-test/dinhtienhoang_page_058_crop_26.jpg	dạ, nhưng cờ đến tay fải fất, đành fải thúc ngựa đối-dịch.
+test/dinhtienhoang_page_058_crop_26.jpg	dạ, nhưng cờ đến tay fải fất, đành fải thúc ngựa đối-địch.
 test/khamdinhdainamhoidiensuletap2__page_023_crop_16.jpg	thổ lại mục, sắc thụ Đăng sĩ tá lang
 test/tutrithonggiam1__page_163_crop_3.jpg	dùng roi đánh Phạm Tuy, gãy răng và xương xườn. Tuy giả vờ
 test/sv_1777_crop_6.jpg	mới để gây dựng phong trào. Riêng Phan Bội Châu, ngoài việc vận
